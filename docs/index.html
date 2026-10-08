@@ -149,7 +149,7 @@ ul.why span { color: var(--muted); font-size: .95rem; }
     <h1>A robot arm controller whose authority you can check.</h1>
     <p class="lead">Driving the SO-101 arms of an XLeRobot from cancho: the servo bus, calibration, kinematics and a safety core every motion goes through, with an authority report the compiler derives.</p>
     <p class="sub">The question it exists to answer: can the compiler prove that the only thing able to move the arms is the safety core, and that a teleoperator, a learned policy or a second program cannot reach the servo bus?</p>
-    <div class="cta"><a class="btn primary" href="#why">Why</a><a class="btn ghost" href="https://github.com/alpibrusl/cancho-robot/issues">The plan</a></div>
+    <div class="cta"><a class="btn primary" href="#why">Why</a><a class="btn ghost" href="https://github.com/alpibrusl/cancho-robot/issues/16">The plan</a></div>
   </div>
   <img class="logo" src="assets/cancho-robot-logo-256.png" alt="cancho-robot: a granite spire among rocks, with circuit traces, a small robot arm and a robot sitting at its foot" width="256" height="256">
 </section>
@@ -197,12 +197,12 @@ keyboard / policy / recorder (Python) --request--&gt; safety core --command--&gt
 
 <section id="question">
   <h2>The question that decides the headline</h2>
-  <p class="sub">The report should name the buses the controller can touch. A serial port is a file, and cancho opens files under a path-narrowed capability; but raw mode at 1 Mbaud needs <code>tcsetattr</code> and, on macOS, the <code>IOSSIOSPEED</code> ioctl: today, a foreign call, reported symbol by symbol rather than device by device. Either cancho grows a serial capability, or v1 says plainly that its device set is enforced in code. Until that is settled it is a target, not a claim.</p>
+  <p class="sub">The report should name the buses the controller can touch. A serial port is a file, and cancho opens files under a path-narrowed capability; but raw mode at 1 Mbaud needs <code>tcsetattr</code> and, on macOS, the <code>IOSSIOSPEED</code> ioctl: today, a foreign call, reported symbol by symbol rather than device by device. Either cancho grows a way to configure a serial device without a foreign call (<a href="https://github.com/alpibrusl/cancho/issues/387">cancho#387</a>), or v1 says plainly that its device set is enforced in code. Until that is settled it is a target, not a claim.</p>
 </section>
 
 <section id="plan">
   <h2>Plan</h2>
-  <p class="sub">The design document comes first, and the first experiment is read-only: open the bus from cancho and get one servo to answer a ping. The epic lists the tasks in the order they would be taken: <a href="https://github.com/alpibrusl/cancho-robot/issues">the issues</a>.</p>
+  <p class="sub">The design document comes first, and the first experiment is read-only: open the bus from cancho and get one servo to answer a ping. The epic lists the tasks in the order they would be taken: <a href="https://github.com/alpibrusl/cancho-robot/issues/16">cancho-robot#16</a>.</p>
 </section>
 
 <section id="status">

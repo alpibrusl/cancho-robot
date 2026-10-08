@@ -4,7 +4,7 @@
 
 **A robot arm controller whose authority you can check.** Research into driving a real arm, the SO-101 arms of an [XLeRobot](https://github.com/Vector-Wangel/XLeRobot), from [cancho](https://github.com/alpibrusl/cancho): the Feetech servo bus, calibration, kinematics and a safety core (workspace, joint limits, collisions, speed), with an authority report the compiler derives. The question it exists to answer: **can the compiler prove that the only thing able to move the arms is the safety core**, and that nothing else (a teleoperator, a learned policy, a second program) can reach the servo bus?
 
-**Status: research, design stage. Nothing is built yet.** There is a README, a logo and an epic with its tasks, and no code, no measurement and no claim beyond what is written here. The plan and its tasks are in the epic (see the issues). Speed of progress is not a goal; a result, positive or negative, written down with its measurement, is.
+**Status: research, design stage. Nothing is built yet.** There is a README, a logo and an epic with its tasks, and no code, no measurement and no claim beyond what is written here. The plan and its tasks are in the epic, [cancho-robot#16](https://github.com/alpibrusl/cancho-robot/issues/16). Speed of progress is not a goal; a result, positive or negative, written down with its measurement, is.
 
 ## Why
 
@@ -34,11 +34,15 @@ Not in v1: cameras, writing datasets, training, running a policy (all stay in Py
 
 ## The question that decides the headline
 
-The report should say *which buses* the controller can touch, the way cancho-dns wanted it to name its upstreams. A serial port is a file, and cancho can open a file under a path-narrowed capability; but putting it in raw mode at a non-standard speed needs `tcsetattr` and, on macOS, the `IOSSIOSPEED` ioctl, which today means a foreign call. A foreign call is reported symbol by symbol, not device by device. So either cancho grows a serial capability (filed upstream once the first spike has measured what is needed), or v1 says plainly that its device set is enforced in code. Until that is settled, "names the exact buses" is a target, not a claim.
+The report should say *which buses* the controller can touch, the way cancho-dns wanted it to name its upstreams. A serial port is a file, and cancho can open a file under a path-narrowed capability; but putting it in raw mode at a non-standard speed needs `tcsetattr` and, on macOS, the `IOSSIOSPEED` ioctl, which today means a foreign call. A foreign call is reported symbol by symbol, not device by device. So either cancho grows a way to configure a serial device without a foreign call ([cancho#387](https://github.com/alpibrusl/cancho/issues/387), design first, waiting on the measurement from the first spike), or v1 says plainly that its device set is enforced in code. Until that is settled, "names the exact buses" is a target, not a claim.
 
 ## What we expect, stated before measuring
 
 The bus runs at 1 Mbaud, a servo answers a read in a median of 0.33 ms (measured by lex-robot's bus check on this robot), and the Python keyboard teleoperation already runs at 30 Hz and feels smooth. The aim is not speed. It is a controller whose authority report, safety refusals and kinematics are each checked against an independent reference (LeRobot reading the same bus, its solver on the same poses), with every difference written down.
+
+## Project page
+
+[alpibrusl.github.io/cancho-robot](https://alpibrusl.github.io/cancho-robot/) (served from `docs/`).
 
 ## Contributing
 
