@@ -68,7 +68,7 @@ def main():
             (tree / "build").mkdir()
             f = tree / path
             text = f.read_text()
-            if text.count(before) != 1:
+            if before == after or text.count(before) != 1:
                 print(f"STALE  {what}: the text to mutate is not in {path} exactly once")
                 missed.append(what)
                 continue
