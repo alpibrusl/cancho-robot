@@ -67,8 +67,8 @@ target its own CI does not exercise)?
 
 **Setup.** Raspberry Pi 5 (8 GB, NVMe), Debian 13, kernel 6.18, glibc 2.41, aarch64; the robot's two USB-serial
 adapters plugged in (`/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B61033220-if00` is the left arm, as on the Mac).
-cancho `7bf3628` built on the Pi with Rust 1.98.1 (rustup); **Cranelift backend**, because the LLVM backend needs
-`clang`, which is not installed yet. `spikes/ping/ping_linux.cho`; the layout from `spikes/ping/abi_linux.c` on
+cancho `7bf3628` built on the Pi with Rust 1.98.1 (rustup); first on the **Cranelift backend**, because the LLVM
+backend needs `clang`, which was not installed yet (it was later the same day: finding 7). `spikes/ping/ping_linux.cho`; the layout from `spikes/ping/abi_linux.c` on
 the Pi.
 
 **What came out.**
@@ -88,5 +88,9 @@ the Pi.
    byte streams). The LLVM backend on this target is still untried (waiting for `clang`).
 5. The authority report is the same as on macOS: foreign symbols, and "never touches the filesystem" while it
    opens a device. **Linux makes configuring the port simpler; it does not change what the report can say.**
-6. The right arm's bus is silent on the Pi too (the left answers ids 1 to 8): a supply question on that side,
-   not the computer.
+6. The right arm's bus was silent on the Pi too (the left answered ids 1 to 8). **Corrected the same day:** it was
+   the cables; reseated, the right bus answers ids 1 to 6 and the wheels 9 and 10.
+7. **With `clang` installed, the LLVM backend works on linux-aarch64 too**: the spike on **both** buses, 3 runs of 3
+   each, left servo 1 = 1882 ticks and right servo 1 = 1898 ticks, each equal to what scservo_sdk read straight
+   after; the 34 tests and the codec differential (40,000 cases) pass on LLVM as on Cranelift. So the backend
+   question in finding 4 is answered: both work on the Pi.
