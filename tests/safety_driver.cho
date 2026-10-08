@@ -1,0 +1,261 @@
+edition 7;
+import std.io;
+import safety;
+import kinematics;
+import so101;
+
+// A test driver for `tests/differential_safety.py`: `safety.approve` behind a pipe. One line per request:
+//
+//     approve <side> <since_ms> <dt_ms> <cur 5> <req 5> <other 5 or ->     angles in degrees as 64-bit float
+//                                                                         bits; '-' when the other arm is absent
+//
+// Answers one line of eight integers: the rule, the joint index, and the five approved goals (or the held pose
+// on a deadman), each float as its 64 bits. Standard input and output, nothing else.
+
+fn token[&l, &s](line: &l [byte], k: int, span: &!s [int]) -> [] bool {
+    var i = 0;
+    var seen = -1;
+    let n = len(line);
+    while i < n {
+        while i < n && int_of(line[i]) == ' ' {
+            i = i + 1;
+        }
+        if i >= n {
+            return false;
+        }
+        let start = i;
+        while i < n && int_of(line[i]) != ' ' {
+            i = i + 1;
+        }
+        seen = seen + 1;
+        if seen == k {
+            span[0] = start;
+            span[1] = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn number[&l, &s](line: &l [byte], k: int, span: &!s [int]) -> [] int {
+    if !token(line, k, span) {
+        return 0;
+    }
+    var i = span[0];
+    var negative = false;
+    if int_of(line[i]) == '-' {
+        negative = true;
+        i = i + 1;
+    }
+    var v = 0;
+    while i < span[1] {
+        v = v * 10 - (int_of(line[i]) - '0');
+        i = i + 1;
+    }
+    if negative {
+        return v;
+    }
+    return -v;
+}
+
+fn is[&l, &w](line: &l [byte], s0: int, s1: int, word: &w [byte]) -> [] bool {
+    if s1 - s0 != len(word) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if int_of(line[s0 + i]) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn bits(x: float) -> [] int {
+    return bits_of(x);
+}
+
+fn answer[&i, &l](io: &!i Io, line: &l [byte]) -> [io_write] int {
+    region a {
+        let span = alloc_slice[a](2, 0);
+        // `check <side> <q 5> <other 5 or ->`: the collision verdict for the arm's requested pose alone,
+        // what the differential compares (the other rules have no counterpart in lex-robot's model).
+        if token(line, 0, span) && is(line, span[0], span[1], "check") {
+            let left = int_of(line[6]) == 'l';
+            let req = alloc_slice[a](5, 0.0);
+            let other = alloc_slice[a](5, 0.0);
+            var k = 0;
+            while k < 5 {
+                req[k] = float_of_bits(number(line, 2 + k, span));
+                other[k] = float_of_bits(number(line, 7 + k, span));
+                k = k + 1;
+            }
+            var absent = true;
+            var with_tray = true;
+            if token(line, 12, span) {
+                absent = int_of(line[span[0]]) == '-';
+            }
+            if token(line, 13, span) {
+                with_tray = int_of(line[span[0]]) == 't';
+            }
+            var y = 0.133;
+            if !left {
+                y = -0.133;
+            }
+            let mount = safety.Mount { x: -0.135, y: y, z: 0.76, yaw_deg: 0.0 };
+            let caps = alloc_slice[a](6, safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+            let none = alloc_slice[a](0, safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+            borrow mount as &m in {
+                if safety.arm_capsules(req, m, caps) != 0 {
+                    report(io, safety.rule_collision_tower(), -1, req);
+                } else if absent {
+                    let rule = safety.collision_rule(caps, none, with_tray);
+                    report(io, rule, -1, req);
+                } else {
+                    let other_mount = safety.other_mount_of(m);
+                    let oc = alloc_slice[a](6, safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+                    borrow other_mount as &om in {
+                        if safety.arm_capsules(other, om, oc) != 0 {
+                            report(io, safety.rule_collision_other(), -1, req);
+                        } else {
+                            let rule = safety.collision_rule(caps, oc, with_tray);
+                            report(io, rule, -1, req);
+                        }
+                    }
+                }
+            }
+            return 0;
+        }
+        let cur = alloc_slice[a](5, 0.0);
+        let req = alloc_slice[a](5, 0.0);
+        let other = alloc_slice[a](5, 0.0);
+        let goals = alloc_slice[a](5, 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        // token 1: the side ('l' or 'r'); tokens 2, 3: since_ms, dt_ms; then cur, req, other
+        if !token(line, 1, span) {
+            return 0;
+        }
+        let left = int_of(line[span[0]]) == 'l';
+        let since_ms = number(line, 2, span);
+        let dt_ms = number(line, 3, span);
+        var k = 0;
+        while k < 5 {
+            cur[k] = float_of_bits(number(line, 4 + k, span));
+            req[k] = float_of_bits(number(line, 9 + k, span));
+            other[k] = float_of_bits(number(line, 14 + k, span));
+            k = k + 1;
+        }
+        // the mount of the side this request is for (lex-robot's robot_geometry.json: symmetric about y = 0)
+        var y = 0.133;
+        if !left {
+            y = -0.133;
+        }
+        let mount = safety.Mount { x: -0.135, y: y, z: 0.76, yaw_deg: 0.0 };
+        // token 19: '-' when the other arm is absent
+        var absent = true;
+        if token(line, 19, span) {
+            absent = int_of(line[span[0]]) == '-';
+        }
+        // the joint limits of the side's own calibration file, as measured spans
+        let lim = alloc_slice[a](10, 0.0);
+        limits_of(left, lim);
+        borrow mount as &m in {
+            if absent {
+                let none = alloc_slice[a](0, 0.0);
+                let rule = safety.approve(req, cur, lim, m, none, since_ms, dt_ms, goals, scale, joint);
+                report(io, rule, joint[0], goals);
+            } else {
+                let rule = safety.approve(req, cur, lim, m, other, since_ms, dt_ms, goals, scale, joint);
+                report(io, rule, joint[0], goals);
+            }
+        }
+    }
+    return 0;
+}
+
+fn report[&i, &g](io: &!i Io, rule: int, joint: int, goals: &g [float]) -> [io_write] int {
+    io.print_int(io, rule);
+    putchar(io, ' ');
+    io.print_int(io, joint);
+    var k = 0;
+    while k < 5 {
+        putchar(io, ' ');
+        io.print_int(io, bits_of(goals[k]));
+        k = k + 1;
+    }
+    io.newline(io);
+    return 0;
+}
+
+// The measured joint spans of this robot's calibration files (tests/fixtures/calibration), in the degrees
+// calibration.degrees reports: the range's mid is zero.
+fn limits_of[&a](left: bool, lim: &!a [float]) -> [] int {
+    if left {
+        lim[0] = -113.2;
+        lim[1] = 113.2;
+        lim[2] = -90.5;
+        lim[3] = 90.5;
+        lim[4] = -95.4;
+        lim[5] = 95.4;
+        lim[6] = -75.3;
+        lim[7] = 75.3;
+        lim[8] = -180.0;
+        lim[9] = 180.0;
+    } else {
+        lim[0] = -100.8;
+        lim[1] = 100.8;
+        lim[2] = -102.1;
+        lim[3] = 102.1;
+        lim[4] = -97.4;
+        lim[5] = 97.4;
+        lim[6] = -101.5;
+        lim[7] = 101.5;
+        lim[8] = -140.6;
+        lim[9] = 140.6;
+    }
+    return 0;
+}
+
+fn run[&i](io: &!i Io) -> [io_read, io_write] int {
+    var more = true;
+    while more {
+        region a {
+            let line = alloc_slice[a](256, byte_of(0));
+            var n = 0;
+            var c = getchar(io);
+            while c >= 0 && c != '\n' {
+                if n < len(line) {
+                    line[n] = byte_of(c);
+                    n = n + 1;
+                }
+                c = getchar(io);
+            }
+            if c < 0 && n == 0 {
+                more = false;
+            } else {
+                answer(io, line[0..n]);
+            }
+        }
+    }
+    return 0;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec } = split(world);
+    release(net);
+    release(clock);
+    release(ffi);
+    release(fs);
+    release(heap);
+    release(args);
+    release(signals);
+    release(exec);
+    var status = 0;
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    release(io);
+    return status;
+}

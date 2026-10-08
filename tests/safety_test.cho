@@ -1,0 +1,395 @@
+import std.test;
+import std.math;
+import safety;
+import kinematics;
+import so101;
+
+// What the safety core (task #8, docs/design.md section 6) must be, besides equal to lex-robot's Python on the
+// same poses (tests/differential_safety.py): each check refuses with its own rule, the two lex-robot regressions
+// (#217, #218) as fixtures, the clamp clamps, and the deadman holds.
+
+fn close(a: float, b: float, tol: float) -> [] bool {
+    let d = a - b;
+    return d < tol && d > -tol;
+}
+
+// The measured joint limits of this robot's left arm (tests/fixtures/calibration/xle_left.json, the spans
+// calibration.degrees reports for range_min..range_max), degrees.
+fn limits[&l](l: &!l [float]) -> [] int {
+    // shoulder_pan: 884..3460 ticks around homing -281 -> LeRobot's degrees span, widened to the round numbers
+    // the calibration file's usable range reports. The exact span is the differential test's business with the
+    // real files; here the bounds only have to bound the fixtures.
+    l[0] = -113.2;
+    l[1] = 113.2; // shoulder_pan (xle_left.json: 884..3460 ticks)
+    l[2] = -90.5;
+    l[3] = 90.5; // shoulder_lift
+    l[4] = -95.4;
+    l[5] = 95.4; // elbow_flex
+    l[6] = -75.3;
+    l[7] = 75.3; // wrist_flex
+    l[8] = -180.0;
+    l[9] = 180.0; // wrist_roll
+    return 0;
+}
+
+fn mount_left() -> [] safety.Mount {
+    return safety.Mount { x: -0.135, y: 0.133, z: 0.76, yaw_deg: 0.0 };
+}
+
+fn request[&r, &g](q0: float, q1: float, q2: float, q3: float, q4: float, req: &!r [float], goals: &!g [float]) -> [] int {
+    req[0] = q0;
+    req[1] = q1;
+    req[2] = q2;
+    req[3] = q3;
+    req[4] = q4;
+    goals[0] = 0.0;
+    goals[1] = 0.0;
+    goals[2] = 0.0;
+    goals[3] = 0.0;
+    goals[4] = 0.0;
+    return 0;
+}
+
+// ── the checks, one per rule ──────────────────────────────────────────────────────────────────────────────
+
+fn test_a_request_outside_the_joint_limits_is_refused_with_limit_joint() -> [] int {
+    region a {
+        let req = alloc_slice[a](5, 0.0);
+        let cur = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let goals = alloc_slice[a](5, 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        let other = alloc_slice[a](0, 0.0);
+        limits(lim);
+        request(0.0, 0.0, 0.0, 80.0, 0.0, req, goals); // wrist_flex past its measured 75.3 deg span
+        let m = mount_left();
+        borrow m as &mm in {
+            let rule = safety.approve(req, cur, lim, mm, other, 0, 100, goals, scale, joint);
+            test.assert_eq(rule, safety.rule_joint());
+            test.assert_eq(joint[0], 3);
+        }
+    }
+    return 0;
+}
+
+fn test_a_gripper_outside_the_workspace_is_refused_with_limit_workspace() -> [] int {
+    region a {
+        let req = alloc_slice[a](5, 0.0);
+        let cur = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let goals = alloc_slice[a](5, 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        let other = alloc_slice[a](0, 0.0);
+        limits(lim);
+        // shoulder_lift at -90 folds the gripper back under the base: outside the bound's z floor.
+        request(0.0, -90.0, 0.0, 0.0, 0.0, req, goals);
+        let m = mount_left();
+        borrow m as &mm in {
+            let rule = safety.approve(req, cur, lim, mm, other, 0, 100, goals, scale, joint);
+            test.assert_eq(rule, safety.rule_workspace());
+        }
+    }
+    return 0;
+}
+
+fn test_the_bound_is_checked_in_the_arms_own_frame() -> [] int {
+    // lex-robot#218: a grant written in the robot's frame and checked in the arm's refused a resting arm. The
+    // zero pose is inside the arm's own bound (the gripper at x 0.391 m, placo's own answer) and clear in
+    // lex-robot's model (measured), so `approve` must take it: the bound is a property of the arm's frame, and
+    // only `to_robot` crosses frames.
+    region a {
+        let req = alloc_slice[a](5, 0.0);
+        let cur = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let goals = alloc_slice[a](5, 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        let other = alloc_slice[a](0, 0.0);
+        limits(lim);
+        request(0.0, 0.0, 0.0, 0.0, 0.0, req, goals);
+        var i = 0;
+        while i < 5 {
+            cur[i] = req[i];
+            i = i + 1;
+        }
+        let m = mount_left();
+        borrow m as &mm in {
+            let rule = safety.approve(req, cur, lim, mm, other, 0, 100, goals, scale, joint);
+            test.assert_eq(rule, safety.rule_ok());
+        }
+    }
+    return 0;
+}
+
+fn test_a_jump_beyond_the_travel_is_refused_with_ik_jump() -> [] int {
+    // lex-robot#217: the solver that asked one joint for 140 degrees to move the gripper 1 cm.
+    region a {
+        let req = alloc_slice[a](5, 0.0);
+        let cur = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let goals = alloc_slice[a](5, 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        let other = alloc_slice[a](0, 0.0);
+        limits(lim);
+        // The gripper barely moves (wrist roll moves it 1.5 cm over 140 deg), one joint is asked for 200
+        // degrees -- inside the roll's span, far past the travel's justification.
+        request(0.0, 0.0, 0.0, 0.0, 100.0, req, goals);
+        cur[0] = 0.0;
+        cur[1] = 0.0;
+        cur[2] = 0.0;
+        cur[3] = 0.0;
+        cur[4] = -100.0;
+        let m = mount_left();
+        borrow m as &mm in {
+            let rule = safety.approve(req, cur, lim, mm, other, 0, 100, goals, scale, joint);
+            test.assert_eq(rule, safety.rule_ik_jump());
+            test.assert_eq(joint[0], 4);
+        }
+    }
+    return 0;
+}
+
+fn test_the_deadman_holds_the_arm_where_it_is() -> [] int {
+    region a {
+        let req = alloc_slice[a](5, 0.0);
+        let cur = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let goals = alloc_slice[a](5, 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        let other = alloc_slice[a](0, 0.0);
+        limits(lim);
+        request(10.0, 10.0, 10.0, 10.0, 10.0, req, goals);
+        cur[0] = 0.0;
+        cur[1] = 0.0;
+        cur[2] = 0.0;
+        cur[3] = 0.0;
+        cur[4] = 0.0;
+        let m = mount_left();
+        borrow m as &mm in {
+            // 299 ms since the last fresh request: still driving.
+            let rule = safety.approve(req, cur, lim, mm, other, 299, 100, goals, scale, joint);
+            test.assert_eq(rule, safety.rule_ok());
+            // 301 ms: the client went quiet, the arm holds its current pose.
+            let held = safety.approve(req, cur, lim, mm, other, 301, 100, goals, scale, joint);
+            test.assert_eq(held, safety.rule_deadman());
+            test.assert(close(goals[0], 0.0, 0.0000000001));
+            test.assert(close(goals[1], 0.0, 0.0000000001));
+            test.assert(close(goals[2], 0.0, 0.0000000001));
+            test.assert(close(goals[3], 0.0, 0.0000000001));
+            test.assert(close(goals[4], 0.0, 0.0000000001));
+        }
+    }
+    return 0;
+}
+
+fn test_the_speed_limit_clamps_and_reports() -> [] int {
+    region a {
+        let req = alloc_slice[a](5, 0.0);
+        let cur = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let goals = alloc_slice[a](5, 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        let other = alloc_slice[a](0, 0.0);
+        limits(lim);
+        // A small move over a very short cycle: faster than 0.25 m/s at the gripper.
+        request(0.0, 5.0, 0.0, 0.0, 0.0, req, goals);
+        cur[0] = 0.0;
+        cur[1] = 0.0;
+        cur[2] = 0.0;
+        cur[3] = 0.0;
+        cur[4] = 0.0;
+        let m = mount_left();
+        borrow m as &mm in {
+            let rule = safety.approve(req, cur, lim, mm, other, 0, 10, goals, scale, joint);
+            test.assert_eq(rule, safety.rule_ok());
+            test.assert(scale[0] < 1.0); // reported as a clamp
+            test.assert(scale[0] > 0.0);
+            test.assert(goals[1] < 5.0); // and the goal scaled down
+            test.assert(goals[1] > 0.0);
+            // The same move over a long cycle is untouched.
+            let rule2 = safety.approve(req, cur, lim, mm, other, 0, 100000, goals, scale, joint);
+            test.assert_eq(rule2, safety.rule_ok());
+            test.assert(close(scale[0], 1.0, 0.0000000001));
+            test.assert(close(goals[1], 5.0, 0.0000000001));
+        }
+    }
+    return 0;
+}
+
+// ── the collision model, as lex-robot's test_collision.py knows the math ─────────────────────────────────
+
+fn test_parallel_capsules_keep_their_distance() -> [] int {
+    let a = safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 1.0, by: 0.0, bz: 0.0, radius: 0.0 };
+    let b = safety.Capsule { ax: 0.0, ay: 1.0, az: 0.0, bx: 1.0, by: 1.0, bz: 0.0, radius: 0.0 };
+    borrow a as &x in {
+        borrow b as &y in {
+            test.assert(close(safety.capsule_clearance(x, y), 1.0, 0.000000001));
+        }
+    }
+    return 0;
+}
+
+fn test_segments_that_only_miss_because_they_are_finite() -> [] int {
+    // lex-robot's regression for treating segments as infinite lines: as lines these cross.
+    let a = safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 1.0, by: 0.0, bz: 0.0, radius: 0.0 };
+    let b = safety.Capsule { ax: 5.0, ay: -1.0, az: 0.0, bx: 5.0, by: 1.0, bz: 0.0, radius: 0.0 };
+    borrow a as &x in {
+        borrow b as &y in {
+            test.assert(close(safety.capsule_clearance(x, y), 4.0, 0.000000001));
+        }
+    }
+    return 0;
+}
+
+fn test_skew_segments() -> [] int {
+    let a = safety.Capsule { ax: -1.0, ay: 0.0, az: 0.0, bx: 1.0, by: 0.0, bz: 0.0, radius: 0.0 };
+    let b = safety.Capsule { ax: 0.0, ay: -1.0, az: 1.0, bx: 0.0, by: 1.0, bz: 1.0, radius: 0.0 };
+    borrow a as &x in {
+        borrow b as &y in {
+            test.assert(close(safety.capsule_clearance(x, y), 1.0, 0.000000001));
+        }
+    }
+    return 0;
+}
+
+fn test_a_pose_above_the_workspace_ceiling_is_refused() -> [] int {
+    region a {
+        let req = alloc_slice[a](5, 0.0);
+        let cur = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let goals = alloc_slice[a](5, 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        let other = alloc_slice[a](0, 0.0);
+        limits(lim);
+        // lift -25 with the elbow folded -60 puts the gripper at x 0.075, z 0.523 m in the arm's own frame:
+        // inside the box in x and y, past the bound's 0.50 ceiling, so the ceiling is what refuses.
+        request(0.0, -25.0, -60.0, 0.0, 0.0, req, goals);
+        let m = mount_left();
+        borrow m as &mm in {
+            let rule = safety.approve(req, cur, lim, mm, other, 0, 100, goals, scale, joint);
+            test.assert_eq(rule, safety.rule_workspace());
+        }
+    }
+    return 0;
+}
+
+fn test_a_wrist_far_outside_the_trays_footprint_is_not_a_tray_hit() -> [] int {
+    // The tray is a box over the tray's footprint, not a plane: the pan 100, lift 20 pose puts the gripper
+    // at y -0.365 in the arm's frame, outside the tray's 0.35 m width, and no capsule of the pose is driven
+    // down into the tray from inside the footprint, so the tray rule must stay quiet. A plane at tray_z
+    // would answer differently -- that difference is the design's, and this test pins it.
+    region a {
+        let req = alloc_slice[a](5, 0.0);
+        req[0] = 100.0;
+        req[1] = 20.0;
+        var i = 0;
+        while i < 5 {
+            if i != 0 && i != 1 {
+                req[i] = 0.0;
+            }
+            i = i + 1;
+        }
+        var tray_hit = false;
+        region b {
+            let caps = alloc_slice[b](6, safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+            let none = alloc_slice[b](0, safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+            let m = mount_left();
+            borrow m as &mm in {
+                test.assert_eq(safety.arm_capsules(req, mm, caps), 0);
+                // with the tray: the verdict must not be the tray's
+                let rule = safety.collision_rule(caps, none, true);
+                test.assert(rule != safety.rule_collision_tray());
+            }
+        }
+    }
+    return 0;
+}
+
+fn test_the_tray_is_a_box_not_a_plane() -> [] int {
+    // A capsule at the tray's height but OUTSIDE its footprint does not hit it: the design refused the infinite
+    // plane. One inside the footprint below the surface does. Outside in x, and outside in y, both clear.
+    let out_x = safety.Capsule { ax: 1.0, ay: 0.0, az: 0.76, bx: 1.0, by: 0.0, bz: 0.76, radius: 0.01 };
+    let out_y = safety.Capsule { ax: 0.0, ay: 1.0, az: 0.76, bx: 0.0, by: 1.0, bz: 0.76, radius: 0.01 };
+    let inside = safety.Capsule { ax: 0.0, ay: 0.0, az: 0.70, bx: 0.0, by: 0.0, bz: 0.70, radius: 0.01 };
+    borrow out_x as &x in {
+        borrow out_y as &z in {
+            borrow inside as &y in {
+                test.assert(safety.tray_clearance(x) > 0.0);
+                test.assert(safety.tray_clearance(z) > 0.0);
+                test.assert(safety.tray_clearance(y) < 0.0);
+            }
+        }
+    }
+    return 0;
+}
+
+fn test_the_moving_arms_capsules_cannot_hit_the_mounted_links() -> [] int {
+    // The mounted links (base->shoulder, shoulder->upper_arm) are bolted to the tray; they are not judged
+    // against the tray, and the first capsule is not judged against the other arm.
+    test.assert_eq(safety.mounted_links(), 2);
+    return 0;
+}
+
+// ── the frames are types ─────────────────────────────────────────────────────────────────────────────────
+
+fn test_the_only_conversion_between_frames_takes_the_mount() -> [] int {
+    let m = mount_left();
+    let p = safety.ArmPoint { x: 0.2, y: 0.1, z: 0.3 };
+    borrow m as &mm in {
+        borrow p as &pp in {
+            let r = safety.to_robot(mm, pp);
+            // yaw 0: the robot frame is the arm frame moved by the mount.
+            test.assert(close(r.x, -0.135 + 0.2, 0.0000000001));
+            test.assert(close(r.y, 0.133 + 0.1, 0.0000000001));
+            test.assert(close(r.z, 0.76 + 0.3, 0.0000000001));
+            // And a yawed mount turns about vertical.
+            let turned = safety.Mount { x: 0.0, y: 0.0, z: 0.0, yaw_deg: 90.0 };
+            borrow turned as &tm in {
+                let t = safety.to_robot(tm, pp);
+                test.assert(close(t.x, -0.1, 0.0000000001));
+                test.assert(close(t.y, 0.2, 0.0000000001));
+            }
+        }
+    }
+    return 0;
+}
+
+fn test_a_wrist_driven_into_the_tower_is_refused() -> [] int {
+    region a {
+        let req = alloc_slice[a](5, 0.0);
+        let cur = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let goals = alloc_slice[a](5, 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        let other = alloc_slice[a](0, 0.0);
+        limits(lim);
+        // The left arm turned hard back over the tower: the capsules of its requested pose, judged directly.
+        request(110.0, 0.0, 0.0, 0.0, 0.0, req, goals);
+        let m = mount_left();
+        region b {
+            let caps = alloc_slice[b](6, safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+            let none = alloc_slice[b](0, safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+            borrow m as &mm in {
+                test.assert_eq(safety.arm_capsules(req, mm, caps), 0);
+                test.assert_eq(safety.collision_rule(caps, none, true), safety.rule_collision_tower());
+                // The same pose, with the other arm present and parked clear, is still the tower's rule: only
+                // the hits the moving arm takes part in count (lex-robot#218).
+                let parked = alloc_slice[b](5, 0.0);
+                let other_caps = alloc_slice[b](6, safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+                let om = safety.other_mount_of(mm);
+                borrow om as &o in {
+                    test.assert_eq(safety.arm_capsules(parked, o, other_caps), 0);
+                    test.assert_eq(safety.collision_rule(caps, other_caps, true), safety.rule_collision_tower());
+                }
+            }
+        }
+    }
+    return 0;
+}

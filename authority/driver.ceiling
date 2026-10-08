@@ -1,0 +1,3 @@
+# tests/driver.cho with the codec: standard input and output, nothing else.
+io_read
+io_write

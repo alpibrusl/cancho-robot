@@ -1,0 +1,32 @@
+[package]
+name = "cancho-robot"
+cancho = "7bf3628c1089ed6e46d26062435267f8991d114f"   # the compiler these sources were written for
+
+# The test harness for the protocol codec (task #4): not shipped, but built and held to its own authority ceiling
+# (authority/driver.ceiling: standard input and output, nothing else).
+[[bin]]
+name = "driver"
+sources = ["src/feetech", "src/feetech_write", "tests/driver"]
+std = true
+out = "build/driver"
+
+# The test harness for calibration (task #6), held to its own ceiling (authority/calibration_driver.ceiling).
+[[bin]]
+name = "calibration_driver"
+sources = ["src/calibration", "tests/calibration_driver"]
+std = true
+out = "build/calibration_driver"
+
+# The test harness for forward kinematics (task #7), held to its own ceiling (authority/kinematics_driver.ceiling).
+[[bin]]
+name = "kinematics_driver"
+sources = ["src/so101", "src/kinematics", "tests/kinematics_driver"]
+std = true
+out = "build/kinematics_driver"
+
+# The test harness for the safety core (task #8), held to its own ceiling (authority/safety_driver.ceiling).
+[[bin]]
+name = "safety_driver"
+sources = ["src/safety", "src/kinematics", "src/so101", "tests/safety_driver"]
+std = true
+out = "build/safety_driver"

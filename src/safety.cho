@@ -1,0 +1,662 @@
+edition 5;
+module safety;
+import std.math;
+import kinematics;
+import so101;
+
+// `safety` -- the safety core (task #8): every motion goes through one function, `approve`, which answers
+// Approved or Refused with a rule tag. The checks, in order (docs/design.md section 6):
+//
+//   limit.joint     the request's angles are within the arm's measured joint limits
+//   limit.workspace the gripper is inside the workspace bound, in the arm's OWN frame (lex-robot#218)
+//   ik.jump          no joint moves further than the distance justifies (lex-robot#217)
+//   collision.*      the capsule model finds no hit the moving arm takes part in (lex-robot#218)
+//   limit.speed      the gripper's speed is clamped (a clamp, not a refusal)
+//   deadman          a driving client that goes quiet holds the arm where it is
+//
+// The bounds are the design doc's section 6 table. The capsule model is ported from lex-robot's
+// sidecar/collision.py: each arm's link frames become capsules, the tower is a vertical capsule, the cart's tray
+// is a box over its footprint (a plane over the whole world is what the design refused), and only the hits the
+// moving arm takes part in count. The geometry (mounts, radii, tower, tray) is lex-robot's robot_geometry.json,
+// whose numbers are estimates until measured on this robot (design section 12); the differential test holds the
+// verdicts to lex-robot's Python on the same poses.
+//
+// Angles are the degrees LeRobot reports (calibration.degrees), all functions are pure, and every refusal carries
+// its rule as data: an int the caller can name, not a string it must parse.
+
+// ── rule tags ────────────────────────────────────────────────────────────────────────────────────────────
+
+pub fn rule_ok() -> [] int {
+    return 0;
+}
+
+pub fn rule_joint() -> [] int {
+    return 1;
+}
+
+pub fn rule_workspace() -> [] int {
+    return 2;
+}
+
+pub fn rule_ik_jump() -> [] int {
+    return 3;
+}
+
+pub fn rule_collision_tower() -> [] int {
+    return 4;
+}
+
+pub fn rule_collision_tray() -> [] int {
+    return 5;
+}
+
+pub fn rule_collision_other() -> [] int {
+    return 6;
+}
+
+pub fn rule_deadman() -> [] int {
+    return 7;
+}
+
+pub fn rule_name(rule: int) -> [] &static [byte] {
+    if rule == rule_joint() {
+        return "limit.joint";
+    }
+    if rule == rule_workspace() {
+        return "limit.workspace";
+    }
+    if rule == rule_ik_jump() {
+        return "ik.jump";
+    }
+    if rule == rule_collision_tower() {
+        return "collision.tower";
+    }
+    if rule == rule_collision_tray() {
+        return "collision.tray";
+    }
+    if rule == rule_collision_other() {
+        return "collision.other";
+    }
+    if rule == rule_deadman() {
+        return "deadman";
+    }
+    return "ok";
+}
+
+// ── frames are types ─────────────────────────────────────────────────────────────────────────────────────
+
+// A point in an arm's own frame (base_link's) and a point in the shared robot frame are different types, and the
+// only conversion takes the arm's mount (lex-robot#218: a bound written in one frame and checked in the other).
+// The mount is lex-robot's ArmMount: a translation and a yaw about vertical.
+
+pub struct ArmPoint {
+    x: float,
+    y: float,
+    z: float,
+}
+
+pub struct RobotPoint {
+    x: float,
+    y: float,
+    z: float,
+}
+
+pub struct Mount {
+    x: float,
+    y: float,
+    z: float,
+    yaw_deg: float,
+}
+
+// The only arm-to-robot conversion: through the arm's mount.
+pub fn to_robot[&m, &r](m: &m Mount, p: &r ArmPoint) -> [] RobotPoint {
+    let c = math.cos(kinematics.radians(m.yaw_deg));
+    let s = math.sin(kinematics.radians(m.yaw_deg));
+    return RobotPoint { x: m.x + c * p.x - s * p.y, y: m.y + s * p.x + c * p.y, z: m.z + p.z };
+}
+
+// ── the bounds (docs/design.md section 6) ────────────────────────────────────────────────────────────────
+
+pub fn workspace_min_x() -> [] float {
+    return 0.05;
+}
+
+pub fn workspace_max_x() -> [] float {
+    return 0.45;
+}
+
+pub fn workspace_min_y() -> [] float {
+    return -0.35;
+}
+
+pub fn workspace_max_y() -> [] float {
+    return 0.35;
+}
+
+pub fn workspace_min_z() -> [] float {
+    return -0.30;
+}
+
+pub fn workspace_max_z() -> [] float {
+    return 0.50;
+}
+
+pub fn speed_limit() -> [] float {
+    return 0.25;
+} // m/s at the gripper
+
+pub fn deadman_bound_ms() -> [] int {
+    return 300;
+} // ms without a fresh request before a hold
+
+pub fn jump_base_deg() -> [] float {
+    return 15.0;
+} // ik.jump: 15 deg plus 6 per cm of gripper travel
+
+pub fn jump_per_cm_deg() -> [] float {
+    return 6.0;
+}
+
+// ── the geometry (lex-robot's robot_geometry.json, ESTIMATES until measured; design section 12) ──────────
+
+// One capsule: a segment with a radius. Coordinates are in the shared robot frame.
+pub struct Capsule {
+    ax: float,
+    ay: float,
+    az: float,
+    bx: float,
+    by: float,
+    bz: float,
+    radius: float,
+}
+
+// The tower, as lex-robot measured it: a vertical capsule behind the arm bases.
+pub fn tower() -> [] Capsule {
+    return Capsule { ax: -0.178, ay: 0.0, az: 0.73, bx: -0.178, by: 0.0, bz: 1.168, radius: 0.06 };
+}
+
+// The cart's tray: a box over the tray's footprint (0.35 x 0.45 m), not an infinite plane. `tray_z` is its surface.
+pub fn tray_z() -> [] float {
+    return 0.76;
+}
+
+pub fn tray_half_x() -> [] float {
+    return 0.225;
+} // 0.45 m along x, the tray's long side is fore-aft
+
+pub fn tray_half_y() -> [] float {
+    return 0.175;
+} // 0.35 m along y
+
+// The margin: a pair counts as colliding below this clearance, so near-misses are refused too.
+pub fn margin() -> [] float {
+    return 0.01;
+}
+
+// The link radii, keyed by the capsule's LOWER frame (lex-robot's `link_radii` names the upper frame of each
+// capsule; here the capsule between frames i and i+1 takes the radius lex-robot gives frame i+1).
+pub fn link_radius(i: int) -> [] float {
+    if i == 1 {
+        return 0.06;
+    } // shoulder_link
+    if i == 2 {
+        return 0.055;
+    } // upper_arm_link
+    if i == 3 {
+        return 0.05;
+    } // lower_arm_link
+    if i == 4 {
+        return 0.05;
+    } // wrist_link
+    if i == 5 {
+        return 0.055;
+    } // gripper_link
+    return 0.065; // gripper_frame_link (i == 6)
+}
+
+pub fn mounted_links() -> [] int {
+    return 2;
+} // base->shoulder, shoulder->upper_arm: bolted to the tray
+
+// ── distance mathematics (Ericson, Real-Time Collision Detection 5.1.9, as lex-robot's collision.py) ─────
+
+fn segment_distance(p1x: float, p1y: float, p1z: float, q1x: float, q1y: float, q1z: float, p2x: float, p2y: float, p2z: float, q2x: float, q2y: float, q2z: float) -> [] float {
+    let d1x = q1x - p1x;
+    let d1y = q1y - p1y;
+    let d1z = q1z - p1z;
+    let d2x = q2x - p2x;
+    let d2y = q2y - p2y;
+    let d2z = q2z - p2z;
+    let rx = p1x - p2x;
+    let ry = p1y - p2y;
+    let rz = p1z - p2z;
+    let a = d1x * d1x + d1y * d1y + d1z * d1z;
+    let e = d2x * d2x + d2y * d2y + d2z * d2z;
+    let f = d2x * rx + d2y * ry + d2z * rz;
+    let eps = 0.000000001;
+    var s = 0.0;
+    var t = 0.0;
+    if a <= eps && e <= eps {
+        s = 0.0;
+        t = 0.0;
+    } else if a <= eps {
+        s = 0.0;
+        t = f / e;
+        if t < 0.0 {
+            t = 0.0;
+        }
+        if t > 1.0 {
+            t = 1.0;
+        }
+    } else {
+        let c = d1x * rx + d1y * ry + d1z * rz;
+        if e <= eps {
+            t = 0.0;
+            s = -c / a;
+            if s < 0.0 {
+                s = 0.0;
+            }
+            if s > 1.0 {
+                s = 1.0;
+            }
+        } else {
+            let b = d1x * d2x + d1y * d2y + d1z * d2z;
+            let denom = a * e - b * b;
+            if denom > eps {
+                s = (b * f - c * e) / denom;
+            } else {
+                s = 0.0;
+            }
+            if s < 0.0 {
+                s = 0.0;
+            }
+            if s > 1.0 {
+                s = 1.0;
+            }
+            t = (b * s + f) / e;
+            if t < 0.0 {
+                t = 0.0;
+                s = -c / a;
+                if s < 0.0 {
+                    s = 0.0;
+                }
+                if s > 1.0 {
+                    s = 1.0;
+                }
+            } else if t > 1.0 {
+                t = 1.0;
+                s = (b - c) / a;
+                if s < 0.0 {
+                    s = 0.0;
+                }
+                if s > 1.0 {
+                    s = 1.0;
+                }
+            }
+        }
+    }
+    let cx = p1x + d1x * s - (p2x + d2x * t);
+    let cy = p1y + d1y * s - (p2y + d2y * t);
+    let cz = p1z + d1z * s - (p2z + d2z * t);
+    return sqrt(cx * cx + cy * cy + cz * cz);
+}
+
+pub fn capsule_clearance[&a, &b](c1: &a Capsule, c2: &b Capsule) -> [] float {
+    let d = segment_distance(c1.ax, c1.ay, c1.az, c1.bx, c1.by, c1.bz, c2.ax, c2.ay, c2.az, c2.bx, c2.by, c2.bz);
+    return d - c1.radius - c2.radius;
+}
+
+// The gap between a capsule and the tray's box: the distance the capsule's segment keeps from the box's volume,
+// less the capsule's radius. Negative means through the tray's surface. The box is a solid over the tray's
+// footprint, from the floor to `tray_z`: a capsule outside the footprint but at the tray's height does not hit it
+// (the design's refusal of the infinite plane), and a capsule inside the footprint below tray_z does.
+pub fn tray_clearance[&a](c: &a Capsule) -> [] float {
+    // The distance from the segment to the box, as the distance to the box's interior if the projection is
+    // inside, else the distance to the nearest face, edge or corner (the segment's endpoints and the segment's
+    // span over each axis decide).
+    let hx = tray_half_x();
+    let hy = tray_half_y();
+    let top = tray_z();
+    // The closest approach of the segment to the box over each axis: the segment's span, clamped.
+    var lox = c.ax;
+    var hix = c.bx;
+    if lox > hix {
+        lox = c.bx;
+        hix = c.ax;
+    }
+    var loy = c.ay;
+    var hiy = c.by;
+    if loy > hiy {
+        loy = c.by;
+        hiy = c.ay;
+    }
+    var loz = c.az;
+    var hiz = c.bz;
+    if loz > hiz {
+        loz = c.bz;
+        hiz = c.az;
+    }
+    // The gap over each axis to the box [(-hx, hx) x (-hy, hy) x (bottom, top)], positive outside.
+    var gx = 0.0;
+    if lox >= hx {
+        gx = lox - hx;
+    } else if hix <= -hx {
+        gx = -hx - hix;
+    }
+    var gy = 0.0;
+    if loy >= hy {
+        gy = loy - hy;
+    } else if hiy <= -hy {
+        gy = -hy - hiy;
+    }
+    var gz = 0.0;
+    if loz >= top {
+        gz = loz - top;
+    } else if hiz <= top {
+        // Wholly below the tray's surface: the vertical gap, negative as far as the segment is under it.
+        gz = loz - top;
+    }
+    // Inside the footprint: the vertical gap decides (negative below the surface, positive above it).
+    if gx == 0.0 && gy == 0.0 {
+        return gz - c.radius;
+    }
+    // Outside the footprint: the horizontal distance to the box's side.
+    let h = sqrt(gx * gx + gy * gy);
+    return h - c.radius;
+}
+
+// ── the arm's capsules ───────────────────────────────────────────────────────────────────────────────────
+
+// The arm's skeleton in the shared robot frame, for the five joint angles in `degrees`: one capsule per pair of
+// consecutive link frames (six capsules over seven frames). `caps` holds six Capsule values.
+pub fn arm_capsules[&d, &m, &c](degrees: &d [float], mount: &m Mount, caps: &!c [Capsule]) -> [] int {
+    if len(degrees) < so101.moving() || len(caps) < so101.transforms() {
+        return -1;
+    }
+    region a {
+        let pts = alloc_slice[a]((so101.transforms() + 1) * 3, 0.0);
+        if kinematics.frames(degrees, pts) != 0 {
+            return -1;
+        }
+        var i = 0;
+        while i < so101.transforms() {
+            let ax = mount.x + pts[i * 3];
+            let ay = mount.y + pts[i * 3 + 1];
+            let az = mount.z + pts[i * 3 + 2];
+            let bx = mount.x + pts[(i + 1) * 3];
+            let by = mount.y + pts[(i + 1) * 3 + 1];
+            let bz = mount.z + pts[(i + 1) * 3 + 2];
+            caps[i] = Capsule { ax: ax, ay: ay, az: az, bx: bx, by: by, bz: bz, radius: link_radius(i + 1) };
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+// ── the checks ───────────────────────────────────────────────────────────────────────────────────────────
+
+// The joint limits from calibration: the request's angles, in the degrees LeRobot reports, within the measured
+// per-joint spans. `limits` holds min then max per joint, ten floats.
+pub fn within_joint_limits[&g, &l](degrees: &g [float], limits: &l [float]) -> [] bool {
+    if len(degrees) < so101.moving() || len(limits) < so101.moving() * 2 {
+        return false;
+    }
+    var i = 0;
+    while i < so101.moving() {
+        if degrees[i] < limits[i * 2] || degrees[i] > limits[i * 2 + 1] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The workspace bound, in the arm's OWN frame: the gripper's position in base_link's frame within the box
+// [x 0.05..0.45, y -0.35..0.35, z -0.30..0.50]. lex-robot#218's defect was a grant in the robot's frame checked
+// in the arm's; the bound is declared on ArmPoint and only `to_robot` crosses frames.
+pub fn within_workspace[&d](degrees: &d [float]) -> [] bool {
+    region a {
+        let pose = alloc_slice[a](16, 0.0);
+        if kinematics.forward(degrees, pose) != 0 {
+            return false;
+        }
+        if pose[3] < workspace_min_x() || pose[3] > workspace_max_x() {
+            return false;
+        }
+        if pose[7] < workspace_min_y() || pose[7] > workspace_max_y() {
+            return false;
+        }
+        if pose[11] < workspace_min_z() || pose[11] > workspace_max_z() {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The ik.jump bound (lex-robot#217): no joint moves further than the gripper's travel justifies. `from_degrees`
+// is the arm's current pose, `to_degrees` the request; the bound is 15 degrees plus 6 per centimetre of gripper
+// travel, and the largest joint travel is what is judged.
+pub fn within_jump[&f, &t](from_degrees: &f [float], to_degrees: &t [float]) -> [] bool {
+    if len(from_degrees) < so101.moving() || len(to_degrees) < so101.moving() {
+        return false;
+    }
+    region a {
+        let from_pose = alloc_slice[a](16, 0.0);
+        let to_pose = alloc_slice[a](16, 0.0);
+        if kinematics.forward(from_degrees, from_pose) != 0 || kinematics.forward(to_degrees, to_pose) != 0 {
+            return false;
+        }
+        let dx = to_pose[3] - from_pose[3];
+        let dy = to_pose[7] - from_pose[7];
+        let dz = to_pose[11] - from_pose[11];
+        let travel_cm = 100.0 * sqrt(dx * dx + dy * dy + dz * dz);
+        let bound = jump_base_deg() + jump_per_cm_deg() * travel_cm;
+        var i = 0;
+        while i < so101.moving() {
+            let jump = math.fabs(to_degrees[i] - from_degrees[i]);
+            if jump > bound {
+                return false;
+            }
+            i = i + 1;
+        }
+    }
+    return true;
+}
+
+// The capsule collision check for a moving arm: the tower, the tray box, and (if the other arm's angles are
+// given) the other arm's capsules, counting only hits the moving arm takes part in. lex-robot#218's frozen arm
+// was an idle arm's false positive; an arm that is not moving is not judged here.
+// The clearance between capsule `i` of one arm's skeleton and capsule `j` of another's, read out of the slices
+// (a `&r [Capsule]` cannot be indexed into a reference directly).
+fn clearance_of[&c, &o](caps: &c [Capsule], i: int, other: &o [Capsule], j: int) -> [] float {
+    let a = caps[i];
+    let b = other[j];
+    borrow a as &x in {
+        borrow b as &y in {
+            return capsule_clearance(x, y);
+        }
+    }
+}
+
+pub fn collision_rule[&c, &o](caps: &c [Capsule], other: &o [Capsule], with_tray: bool) -> [] int {
+    // The worst hit first, as lex-robot sorts its list: the rule a refusal names is the one with the least
+    // clearance, so a pose that hits two objects is refused for the one that matters.
+    var worst = 0.0; // rule_ok's sentinel: no hit found yet
+    var worst_rule = rule_ok();
+    var found = false;
+    let tw = tower();
+    borrow tw as &w in {
+        var i = 0;
+        while i < len(caps) {
+            let c = caps[i];
+            borrow c as &cc in {
+                if i > 0 {
+                    let d = capsule_clearance(cc, w);
+                    if d < margin() && (!found || d < worst) {
+                        found = true;
+                        worst = d;
+                        worst_rule = rule_collision_tower();
+                    }
+                }
+                if with_tray && i >= mounted_links() {
+                    let d = tray_clearance(cc);
+                    if d < margin() && (!found || d < worst) {
+                        found = true;
+                        worst = d;
+                        worst_rule = rule_collision_tray();
+                    }
+                }
+            }
+            i = i + 1;
+        }
+    }
+    // Each arm's first link is bolted down; it cannot reach the other arm.
+    var j = 1;
+    while j < len(caps) {
+        var k = 1;
+        while k < len(other) {
+            let d = clearance_of(caps, j, other, k);
+            if d < margin() && (!found || d < worst) {
+                found = true;
+                worst = d;
+                worst_rule = rule_collision_other();
+            }
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    return worst_rule;
+}
+
+// The speed clamp (a clamp, not a refusal): scales the request so the gripper moves no faster than the limit over
+// `dt_ms`. Answers the scale (1.0 untouched, below 1 clamped), interpolated joint by joint.
+pub fn speed_scale[&f, &t](from_degrees: &f [float], to_degrees: &t [float], dt_ms: int) -> [] float {
+    if len(from_degrees) < so101.moving() || len(to_degrees) < so101.moving() || dt_ms <= 0 {
+        return 1.0;
+    }
+    region a {
+        let from_pose = alloc_slice[a](16, 0.0);
+        let to_pose = alloc_slice[a](16, 0.0);
+        if kinematics.forward(from_degrees, from_pose) != 0 || kinematics.forward(to_degrees, to_pose) != 0 {
+            return 1.0;
+        }
+        let dx = to_pose[3] - from_pose[3];
+        let dy = to_pose[7] - from_pose[7];
+        let dz = to_pose[11] - from_pose[11];
+        let distance = sqrt(dx * dx + dy * dy + dz * dz);
+        let speed = distance / (float_of(dt_ms) / 1000.0);
+        if speed <= speed_limit() {
+            return 1.0;
+        }
+        return speed_limit() / speed;
+    }
+}
+
+// The deadman: no fresh request from a driving client within the bound holds the arm. `since_ms` is how long ago
+// the last fresh request arrived. Stop is not limp: the arm keeps its pose, it does not go slack.
+pub fn deadman_holds(since_ms: int) -> [] bool {
+    return since_ms > deadman_bound_ms();
+}
+
+// ── approve ──────────────────────────────────────────────────────────────────────────────────────────────
+
+// The one function every motion goes through. `request` is the five goal angles (degrees, LeRobot's), `current`
+// the arm's present angles, `limits` the measured joint limits (min, max per joint), `mount` the arm's mount,
+// `other` the other arm's present angles if it is on the robot, `since_ms` the time since the last fresh request
+// from the driving client, and `dt_ms` the cycle time the motion would take. Answers the rule the request was
+// refused with (rule_ok to approve), and writes the approved (possibly speed-clamped) goals into `goals`, the
+// scale applied into `scale` (reported as a clamp), and the refusal's joint index into `joint` (-1 when it has
+// none).
+pub fn approve[&r, &c, &l, &m, &g, &s, &j, &o](request: &r [float], current: &c [float], limits: &l [float], mount: &m Mount, other: &o [float], since_ms: int, dt_ms: int, goals: &!g [float], scale: &!s [float], joint: &!j [int]) -> [] int {
+    if len(goals) < so101.moving() || len(scale) < 1 || len(joint) < 1 {
+        return rule_joint();
+    }
+    scale[0] = 1.0;
+    joint[0] = -1;
+    if len(goals) < so101.moving() || len(current) < so101.moving() {
+        return rule_joint();
+    }
+    // The deadman first: a client that has gone quiet holds the arm where it is, which is its current pose.
+    if deadman_holds(since_ms) {
+        var h = 0;
+        while h < so101.moving() {
+            goals[h] = current[h];
+            h = h + 1;
+        }
+        return rule_deadman();
+    }
+    if len(request) < so101.moving() || len(limits) < so101.moving() * 2 {
+        return rule_joint();
+    }
+    // limit.joint: the request's angles are inside the measured spans.
+    var i = 0;
+    while i < so101.moving() {
+        if request[i] < limits[i * 2] || request[i] > limits[i * 2 + 1] {
+            joint[0] = i;
+            return rule_joint();
+        }
+        i = i + 1;
+    }
+    // limit.workspace: the gripper inside the bound, in this arm's own frame.
+    if !within_workspace(request) {
+        return rule_workspace();
+    }
+    // ik.jump: no joint further than the distance justifies.
+    if !within_jump(current, request) {
+        var k = 0;
+        var worst = 0;
+        var worst_jump = 0.0 - 1.0;
+        while k < so101.moving() {
+            let jump = math.fabs(request[k] - current[k]);
+            if jump > worst_jump {
+                worst_jump = jump;
+                worst = k;
+            }
+            k = k + 1;
+        }
+        joint[0] = worst;
+        return rule_ik_jump();
+    }
+    // collision.*: this arm's requested pose against the tower, the tray and the other arm. An empty `other`
+    // slice means the other arm is absent; a non-empty one is judged at ITS OWN mount, mirrored about the
+    // robot's centre line.
+    region a {
+        let caps = alloc_slice[a](so101.transforms(), Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+        if arm_capsules(request, mount, caps) != 0 {
+            return rule_collision_tower();
+        }
+        if len(other) == 0 {
+            let none = alloc_slice[a](0, Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+            let rule = collision_rule(caps, none, true);
+            if rule != rule_ok() {
+                return rule;
+            }
+        } else {
+            let other_mount = other_mount_of(mount);
+            let oc = alloc_slice[a](so101.transforms(), Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+            borrow other_mount as &om in {
+                if arm_capsules(other, om, oc) != 0 {
+                    return rule_collision_other();
+                }
+            }
+            let rule = collision_rule(caps, oc, true);
+            if rule != rule_ok() {
+                return rule;
+            }
+        }
+    }
+    // limit.speed: a clamp, not a refusal. The goals interpolate between the current pose and the request.
+    scale[0] = speed_scale(current, request, dt_ms);
+    var j2 = 0;
+    while j2 < so101.moving() {
+        goals[j2] = current[j2] + (request[j2] - current[j2]) * scale[0];
+        j2 = j2 + 1;
+    }
+    return rule_ok();
+}
+
+// The mount of the other arm, given one arm's mount: the XLeRobot's arms are symmetric about the robot's centre
+// line (y = 0), so the other mount is this mount mirrored in y.
+pub fn other_mount_of[&m](m: &m Mount) -> [] Mount {
+    return Mount { x: m.x, y: 0.0 - m.y, z: m.z, yaw_deg: m.yaw_deg };
+}

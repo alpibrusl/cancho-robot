@@ -1,0 +1,70 @@
+import std.test;
+import feetech;
+import feetech_write;
+
+// What `feetech_write` builds. No test here sends anything: these are byte strings compared with the protocol.
+
+fn test_write_torque_enable_on_servo_1() -> [] int {
+    region a {
+        let out = alloc_slice[a](16, byte_of(0));
+        let one = alloc_slice[a](1, byte_of(1));
+        // FF FF 01 04 03 28 01 chk
+        test.assert_eq(feetech_write.write(out, 1, 40, one), 8);
+        test.assert_eq(int_of(out[3]), 4);
+        test.assert_eq(int_of(out[4]), 3);
+        test.assert_eq(int_of(out[5]), 40);
+        test.assert_eq(int_of(out[6]), 1);
+        test.assert_eq(int_of(out[7]), feetech.checksum(out, 2, 7));
+    }
+    return 0;
+}
+
+fn test_sync_write_goal_position_to_two_servos() -> [] int {
+    region a {
+        let out = alloc_slice[a](32, byte_of(0));
+        let blocks = alloc_slice[a](6, byte_of(0));
+        // id 1 -> 2048 (00 08), id 2 -> 1882 (5a 07)
+        blocks[0] = byte_of(1);
+        blocks[1] = byte_of(0);
+        blocks[2] = byte_of(8);
+        blocks[3] = byte_of(2);
+        blocks[4] = byte_of(90);
+        blocks[5] = byte_of(7);
+        let n = feetech_write.sync_write(out, 42, 2, blocks);
+        test.assert_eq(n, 14);
+        test.assert_eq(int_of(out[2]), 254);
+        test.assert_eq(int_of(out[3]), 10);
+        test.assert_eq(int_of(out[4]), 131);
+        test.assert_eq(int_of(out[5]), 42);
+        test.assert_eq(int_of(out[6]), 2);
+        test.assert_eq(int_of(out[13]), feetech.checksum(out, 2, 13));
+    }
+    return 0;
+}
+
+fn test_the_write_builders_refuse_what_they_cannot_send() -> [] int {
+    region a {
+        let out = alloc_slice[a](16, byte_of(0));
+        let none = alloc_slice[a](0, byte_of(0));
+        let one = alloc_slice[a](1, byte_of(1));
+        let ragged = alloc_slice[a](5, byte_of(1));
+        let bad_id = alloc_slice[a](3, byte_of(254));
+        test.assert_eq(feetech_write.write(out, 255, 40, one), feetech.error_bad_id());
+        test.assert_eq(feetech_write.write(out, 1, 40, none), feetech.error_bad_argument());
+        test.assert_eq(feetech_write.write(out, 1, 300, one), feetech.error_bad_argument());
+        test.assert_eq(feetech_write.action(out, 255), feetech.error_bad_id());
+        test.assert_eq(feetech_write.sync_write(out, 42, 2, ragged), feetech.error_bad_argument());
+        test.assert_eq(feetech_write.sync_write(out, 42, 2, bad_id), feetech.error_bad_id());
+        test.assert_eq(feetech_write.sync_write(out, 42, 0, one), feetech.error_bad_argument());
+    }
+    return 0;
+}
+
+fn test_action_is_six_bytes() -> [] int {
+    region a {
+        let out = alloc_slice[a](16, byte_of(0));
+        test.assert_eq(feetech_write.action(out, 254), 6);
+        test.assert_eq(int_of(out[4]), 5);
+    }
+    return 0;
+}
