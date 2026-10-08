@@ -30,3 +30,11 @@ name = "safety_driver"
 sources = ["src/safety", "src/kinematics", "src/so101", "tests/safety_driver"]
 std = true
 out = "build/safety_driver"
+
+# The test harness for inverse kinematics (task #7's second half), held to its own ceiling
+# (authority/ik_driver.ceiling).
+[[bin]]
+name = "ik_driver"
+sources = ["src/ik", "src/kinematics", "src/so101", "tests/ik_driver"]
+std = true
+out = "build/ik_driver"

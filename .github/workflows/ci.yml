@@ -129,6 +129,21 @@ jobs:
       - name: The kinematics gates can fail (each deliberately wrong kinematics is caught)
         working-directory: robot
         run: python3 tests/mutate_kinematics.py ../cancho/target/release/cancho python3
+      - name: Inverse kinematics tests (the live-state lessons, the jump guard, the refusals)
+        working-directory: robot
+        run: ../cancho/target/release/cancho test tests/ik_test.cho src/ik.cho src/kinematics.cho src/so101.cho --std
+      - name: Build the ik driver
+        working-directory: robot
+        run: ../cancho/target/release/cancho build --std tests/ik_driver.cho src/ik.cho src/kinematics.cho src/so101.cho -o build/ik_driver
+      - name: Inverse kinematics against placo, from the same live state (gate C4, the IK half)
+        working-directory: robot
+        run: python3 tests/differential_ik.py build/ik_driver --cases 800
+      - name: The ik gates can fail (each deliberately wrong solver is caught)
+        working-directory: robot
+        run: python3 tests/mutate_ik.py ../cancho/target/release/cancho python3
+      - name: IK driver authority is within its ceiling
+        working-directory: robot
+        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/ik_driver.ceiling tests/ik_driver.cho src/ik.cho src/kinematics.cho src/so101.cho
 
       - name: Kinematics driver authority is within its ceiling
         working-directory: robot
