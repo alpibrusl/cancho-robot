@@ -1,0 +1,139 @@
+edition 7;
+
+import std.io;
+import kinematics;
+
+// A test driver for `tests/differential_kinematics.py`: `kinematics.forward` behind a pipe. One line per pose:
+//
+//     fk <a1> <a2> <a3> <a4> <a5>       five joint angles in degrees, each given as its 64 bits (float_of_bits)
+//
+// Answers one line of sixteen integers: the 4x4 pose, row-major, each float as its 64 bits (bits_of). Standard
+// input and output, nothing else.
+
+fn token[&l, &s](line: &l [byte], k: int, span: &!s [int]) -> [] bool {
+    var i = 0;
+    var seen = -1;
+    let n = len(line);
+    while i < n {
+        while i < n && int_of(line[i]) == ' ' {
+            i = i + 1;
+        }
+        if i >= n {
+            return false;
+        }
+        let start = i;
+        while i < n && int_of(line[i]) != ' ' {
+            i = i + 1;
+        }
+        seen = seen + 1;
+        if seen == k {
+            span[0] = start;
+            span[1] = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+// A decimal integer, possibly negative, the full 64-bit range (float bits need it).
+fn number[&l, &s](line: &l [byte], k: int, span: &!s [int]) -> [] int {
+    if !token(line, k, span) {
+        return 0;
+    }
+    var i = span[0];
+    var negative = false;
+    if int_of(line[i]) == '-' {
+        negative = true;
+        i = i + 1;
+    }
+    // Accumulate negatively, so -9223372036854775808 fits.
+    var v = 0;
+    while i < span[1] {
+        v = v * 10 - (int_of(line[i]) - '0');
+        i = i + 1;
+    }
+    if negative {
+        return v;
+    }
+    return -v;
+}
+
+fn is[&l, &w](line: &l [byte], s0: int, s1: int, word: &w [byte]) -> [] bool {
+    if s1 - s0 != len(word) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if int_of(line[s0 + i]) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn answer[&i, &l](io: &!i Io, line: &l [byte]) -> [io_write] int {
+    region a {
+        let span = alloc_slice[a](2, 0);
+        let q = alloc_slice[a](5, 0.0);
+        let pose = alloc_slice[a](16, 0.0);
+        var k = 0;
+        while k < 5 {
+            q[k] = float_of_bits(number(line, k + 1, span));
+            k = k + 1;
+        }
+        kinematics.forward(q, pose);
+        var i = 0;
+        while i < 16 {
+            if i > 0 {
+                putchar(io, ' ');
+            }
+            io.print_int(io, bits_of(pose[i]));
+            i = i + 1;
+        }
+        io.newline(io);
+    }
+    return 0;
+}
+
+fn run[&i](io: &!i Io) -> [io_read, io_write] int {
+    var more = true;
+    while more {
+        region a {
+            let line = alloc_slice[a](256, byte_of(0));
+            var n = 0;
+            var c = getchar(io);
+            while c >= 0 && c != '\n' {
+                if n < len(line) {
+                    line[n] = byte_of(c);
+                    n = n + 1;
+                }
+                c = getchar(io);
+            }
+            if c < 0 && n == 0 {
+                more = false;
+            } else {
+                answer(io, line[0..n]);
+            }
+        }
+    }
+    return 0;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec } = split(world);
+    release(net);
+    release(clock);
+    release(ffi);
+    release(fs);
+    release(heap);
+    release(args);
+    release(signals);
+    release(exec);
+    var status = 0;
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    release(io);
+    return status;
+}

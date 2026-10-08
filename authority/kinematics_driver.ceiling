@@ -1,0 +1,3 @@
+# tests/kinematics_driver.cho with the kinematics: standard input and output, nothing else.
+io_read
+io_write

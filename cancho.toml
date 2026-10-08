@@ -16,3 +16,10 @@ name = "calibration_driver"
 sources = ["src/calibration", "tests/calibration_driver"]
 std = true
 out = "build/calibration_driver"
+
+# The test harness for forward kinematics (task #7), held to its own ceiling (authority/kinematics_driver.ceiling).
+[[bin]]
+name = "kinematics_driver"
+sources = ["src/so101", "src/kinematics", "tests/kinematics_driver"]
+std = true
+out = "build/kinematics_driver"
