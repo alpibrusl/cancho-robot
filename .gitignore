@@ -1,0 +1,12 @@
+# Build output
+target/
+*.o
+
+# Never commit what the cameras see: frames show the home this robot lives in.
+# Only derived data (joint traces, measurements) belongs in the repository.
+*.jpg
+*.jpeg
+*.mp4
+recordings/
+outputs/
+!docs/assets/*.png
