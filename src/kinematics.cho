@@ -126,3 +126,40 @@ pub fn forward[&d, &p](degrees: &d [float], pose: &!p [float]) -> [] int {
     }
     return 0;
 }
+
+// The origin of every link frame in the chain, in base_link's frame, for the five joint angles in `degrees`: the
+// capsule model's skeleton. `points` holds 3 floats per frame, `so101.transforms() + 1` frames (base_link's origin
+// first, at 0 0 0), so 21 floats for this chain. Answers 0, or -1 if the slices are too small.
+pub fn frames[&d, &p](degrees: &d [float], points: &!p [float]) -> [] int {
+    if len(degrees) < so101.moving() || len(points) < (so101.transforms() + 1) * 3 {
+        return -1;
+    }
+    region a {
+        let t = alloc_slice[a](16, 0.0);
+        let scratch = alloc_slice[a](16, 0.0);
+        let m = alloc_slice[a](16, 0.0);
+        identity(m);
+        points[0] = 0.0;
+        points[1] = 0.0;
+        points[2] = 0.0;
+        var k = 0;
+        while k < so101.transforms() {
+            var q = 0.0;
+            if k < so101.moving() {
+                q = radians(degrees[k]);
+            }
+            element(k, q, t);
+            times(m, t, scratch);
+            var i = 0;
+            while i < 16 {
+                m[i] = scratch[i];
+                i = i + 1;
+            }
+            points[(k + 1) * 3] = m[3];
+            points[(k + 1) * 3 + 1] = m[7];
+            points[(k + 1) * 3 + 2] = m[11];
+            k = k + 1;
+        }
+    }
+    return 0;
+}

@@ -133,3 +133,20 @@ jobs:
       - name: Kinematics driver authority is within its ceiling
         working-directory: robot
         run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/kinematics_driver.ceiling tests/kinematics_driver.cho src/kinematics.cho src/so101.cho
+      - name: Safety core tests (each rule, the two lex-robot regressions, the distance math, the frames)
+        working-directory: robot
+        run: ../cancho/target/release/cancho test tests/safety_test.cho src/safety.cho src/kinematics.cho src/so101.cho --std
+      - name: Build the safety driver
+        working-directory: robot
+        run: ../cancho/target/release/cancho build --std tests/safety_driver.cho src/safety.cho src/kinematics.cho src/so101.cho -o build/safety_driver
+      - name: lex-robot, the oracle of the safety differential (MIT; collision.py and robot_geometry.json)
+        run: git clone --depth 1 https://github.com/alpibrusl/lex-robot /tmp/lex-robot
+      - name: Safety core against lex-robot's model (gate C5)
+        working-directory: robot
+        run: python3 tests/differential_safety.py build/safety_driver --cases 1500 --collision-py /tmp/lex-robot/sidecar
+      - name: The safety gates can fail (each deliberately wrong check is caught)
+        working-directory: robot
+        run: python3 tests/mutate_safety.py ../cancho/target/release/cancho python3 /tmp/lex-robot/sidecar
+      - name: Safety driver authority is within its ceiling
+        working-directory: robot
+        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/safety_driver.ceiling tests/safety_driver.cho src/safety.cho src/kinematics.cho src/so101.cho

@@ -209,6 +209,15 @@ and lower memory. **Not the claim:** speed. A loss is written up here, in place,
 | R1 | #4, #5 | `serial` module from the spike; codec; read both buses | C1, C2, C6, A1-A3 |
 | R2 | #6, #7 | calibration; kinematics | C3, C4 |
 | R3 | #8 | the safety core, on data only | C5 |
+
+R3 is done (branch `safety/core`): `src/safety.cho` checks every motion through one `approve` -- joint limits
+from the calibration spans, the workspace bound in the arm's own frame with `ArmPoint`/`RobotPoint` as distinct
+types, the ik.jump bound, the capsule model (tower, tray as a box over the tray's footprint -- not the plane
+lex-robot checks, the difference counted in the differential -- and the other arm, only the hits the moving arm
+takes part in), a speed clamp that reports itself, and a deadman that holds the pose. Gate C5 holds it to
+lex-robot's `collision.py` on recorded and random poses (tower and other-arm verdicts match exactly; the tray
+differences are the design's own box-vs-plane choice, counted and reported), and `tests/mutate_safety.py` kills
+twelve mutants of the checks.
 | R4 | #9 | actuation through the core, **first motion** | hardware gates |
 | R5 | #10, #11, #12 | teleoperation; the Python boundary; the agent contract | key-to-stop latency; LeRobot records through the boundary |
 | R6 | #13 | measurements | section 9 |
