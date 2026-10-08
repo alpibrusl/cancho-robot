@@ -9,3 +9,10 @@ name = "driver"
 sources = ["src/feetech", "src/feetech_write", "tests/driver"]
 std = true
 out = "build/driver"
+
+# The test harness for calibration (task #6), held to its own ceiling (authority/calibration_driver.ceiling).
+[[bin]]
+name = "calibration_driver"
+sources = ["src/calibration", "tests/calibration_driver"]
+std = true
+out = "build/calibration_driver"

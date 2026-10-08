@@ -78,3 +78,31 @@ jobs:
           python3 tests/authority_check.py ../cancho/target/release/cancho /tmp/too-small.ceiling tests/driver.cho src/feetech.cho src/feetech_write.cho --expect-failure
           printf 'io_read\nio_write\nforeign open\n' > /tmp/stale.ceiling
           python3 tests/authority_check.py ../cancho/target/release/cancho /tmp/stale.ceiling tests/driver.cho src/feetech.cho src/feetech_write.cho --expect-failure
+
+      - name: Calibration tests (this robot's ranges, truncation, drive mode, inverted ranges, sign-magnitude)
+        working-directory: robot
+        run: ../cancho/target/release/cancho test tests/calibration_test.cho src/calibration.cho --std
+
+      - name: Build the calibration driver
+        working-directory: robot
+        run: ../cancho/target/release/cancho build --std tests/calibration_driver.cho src/calibration.cho -o build/calibration_driver
+
+      - name: LeRobot's motor bus, the oracle of the calibration differential
+        # lerobot.motors imports lerobot.utils, which imports torch (device_utils); the CPU wheel is enough and nothing
+        # here runs a model. --no-deps keeps the rest of LeRobot's stack (datasets, video) out.
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install --no-deps lerobot==0.6.1
+          pip install tqdm huggingface_hub draccus numpy pyserial deepdiff
+
+      - name: Calibration differential against LeRobot, bit for bit (gate C3)
+        working-directory: robot
+        run: python3 tests/differential_calibration.py build/calibration_driver --cases 200
+
+      - name: The calibration gates can fail (each deliberately wrong calibration is caught)
+        working-directory: robot
+        run: python3 tests/mutate_calibration.py ../cancho/target/release/cancho python3
+
+      - name: Calibration driver authority is within its ceiling
+        working-directory: robot
+        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/calibration_driver.ceiling tests/calibration_driver.cho src/calibration.cho
