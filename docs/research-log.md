@@ -59,3 +59,34 @@ at 1 Mbaud, with the same reading as the reference. But today that takes foreign
 workarounds (`strdup` for a C string, termios written by hand) and one ABI hack (a variadic `ioctl`
 that otherwise fails *silently*), and the report cannot say which device it reaches. Findings 1, 2,
 4, 5 and 6 go to cancho#387; finding 2 is filed as a compiler bug.
+
+## 2026-10-08 · #3 · The same spike on Linux, on the robot's Raspberry Pi 5
+
+**Asked.** Does the bus open as easily from cancho on Linux, and does cancho run at all on linux-aarch64 (a
+target its own CI does not exercise)?
+
+**Setup.** Raspberry Pi 5 (8 GB, NVMe), Debian 13, kernel 6.18, glibc 2.41, aarch64; the robot's two USB-serial
+adapters plugged in (`/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B61033220-if00` is the left arm, as on the Mac).
+cancho `7bf3628` built on the Pi with Rust 1.98.1 (rustup); **Cranelift backend**, because the LLVM backend needs
+`clang`, which is not installed yet. `spikes/ping/ping_linux.cho`; the layout from `spikes/ping/abi_linux.c` on
+the Pi.
+
+**What came out.**
+
+1. **Linux needs no `ioctl`.** 1,000,000 baud is a standard rate there (`B1000000`, 010010 octal, in the `CBAUD`
+   bits of `c_cflag`), so `tcsetattr` alone sets it; no two-step, no variadic call. Read back: the speed bits are
+   4104, as written.
+2. **The ABI differs from macOS in almost every number**: `struct termios` is 60 bytes with 4-byte fields (72 and 8
+   on macOS), `c_cflag` at 8, `c_cc` at 17, `VMIN` 6 and `VTIME` 5, `O_NONBLOCK` 2048, `O_NOCTTY` 256,
+   `TCIFLUSH` 0 (1 on macOS), `CLOCAL` 0x800, `CREAD` 0x80. glibc 2.41 also stores the B-constant in
+   `c_ispeed`/`c_ospeed` (measured: 4104 after `cfsetspeed(B1000000)`). Every one of these is a constant a
+   program writing `extern fn` has to get right per platform, and gets no help from the compiler for.
+3. **Servo 1 answered, 3 runs of 3**: PING `ff ff 01 02 00 fc`, READ `ff ff 01 04 00 5a 07 99` = **1882 ticks, the
+   value scservo_sdk read on the Pi straight after** (and the same as on the Mac: the arm had not moved).
+4. **cancho works on linux-aarch64 with Cranelift**: the codec, calibration and kinematics test files (34 tests)
+   pass there, and the codec's differential against scservo_sdk passes on the Pi (20,000 instructions, 20,000
+   byte streams). The LLVM backend on this target is still untried (waiting for `clang`).
+5. The authority report is the same as on macOS: foreign symbols, and "never touches the filesystem" while it
+   opens a device. **Linux makes configuring the port simpler; it does not change what the report can say.**
+6. The right arm's bus is silent on the Pi too (the left answers ids 1 to 8): a supply question on that side,
+   not the computer.
