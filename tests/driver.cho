@@ -1,0 +1,255 @@
+edition 5;
+
+import std.io;
+import feetech;
+import feetech_write;
+
+// A test driver for `tests/differential_codec.py`: the codec behind a pipe, nothing more. One command per line on
+// standard input; numbers in decimal, byte strings in hex:
+//
+//     ping <id>                         read <id> <address> <count>          sync_read <address> <count> <ids>
+//     write <id> <address> <data>       reg_write <id> <address> <data>      action <id>
+//     sync_write <address> <count> <blocks>                                    decode <expected id> <bytes>
+//
+// Answers one line each: `PKT <hex>`, `OK <consumed> <id> <error> <param start> <param count> <skipped>`, `NEED`,
+// or `ERR <code> <rule tag>`. It reads standard input and writes standard output, and nothing else (its
+// authority ceiling, authority/driver.ceiling, says so).
+
+fn hexval(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    if c >= 'A' && c <= 'F' {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+fn digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+// Where token `k` of `line` starts and ends, into `span`; false if there is no such token.
+fn token[&l, &s](line: &l [byte], k: int, span: &!s [int]) -> [] bool {
+    var i = 0;
+    var seen = -1;
+    let n = len(line);
+    while i < n {
+        while i < n && int_of(line[i]) == ' ' {
+            i = i + 1;
+        }
+        if i >= n {
+            return false;
+        }
+        let start = i;
+        while i < n && int_of(line[i]) != ' ' {
+            i = i + 1;
+        }
+        seen = seen + 1;
+        if seen == k {
+            span[0] = start;
+            span[1] = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn number[&l, &s](line: &l [byte], k: int, span: &!s [int]) -> [] int {
+    if !token(line, k, span) {
+        return -1000000;
+    }
+    var i = span[0];
+    var sign = 1;
+    if int_of(line[i]) == '-' {
+        sign = -1;
+        i = i + 1;
+    }
+    var v = 0;
+    while i < span[1] {
+        let d = int_of(line[i]) - '0';
+        if d < 0 || d > 9 {
+            return -1000000;
+        }
+        if v < 100000000 {
+            v = v * 10 + d;
+        }
+        i = i + 1;
+    }
+    return sign * v;
+}
+
+// Token `k` as hex bytes into `out`; answers how many.
+fn bytes_of[&l, &s, &o](line: &l [byte], k: int, span: &!s [int], out: &!o [byte]) -> [] int {
+    if !token(line, k, span) {
+        return 0;
+    }
+    var n = 0;
+    var i = span[0];
+    while i + 1 < span[1] && n < len(out) {
+        let hi = hexval(int_of(line[i]));
+        let lo = hexval(int_of(line[i + 1]));
+        if hi < 0 || lo < 0 {
+            return n;
+        }
+        out[n] = byte_of(hi * 16 + lo);
+        n = n + 1;
+        i = i + 2;
+    }
+    return n;
+}
+
+fn is[&l, &w](line: &l [byte], span_start: int, span_end: int, word: &w [byte]) -> [] bool {
+    if span_end - span_start != len(word) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if int_of(line[span_start + i]) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn packet_or_error[&i, &o](io: &!i Io, out: &o [byte], r: int) -> [io_write] int {
+    if r < 0 {
+        io.write_all(io, "ERR ");
+        io.print_int(io, r);
+        putchar(io, ' ');
+        io.write_all(io, feetech.error_tag(r));
+    } else {
+        io.write_all(io, "PKT ");
+        var k = 0;
+        while k < r {
+            let v = int_of(out[k]);
+            putchar(io, digit(v / 16));
+            putchar(io, digit(v % 16));
+            k = k + 1;
+        }
+    }
+    io.newline(io);
+    return 0;
+}
+
+fn answer[&i, &l](io: &!i Io, line: &l [byte]) -> [io_write] int {
+    region a {
+        let span = alloc_slice[a](2, 0);
+        let out = alloc_slice[a](512, byte_of(0));
+        let data = alloc_slice[a](512, byte_of(0));
+        let table = alloc_slice[a](feetech.slots(), 0);
+        if !token(line, 0, span) {
+            return 0;
+        }
+        let s0 = span[0];
+        let s1 = span[1];
+        if is(line, s0, s1, "ping") {
+            return packet_or_error(io, out, feetech.ping(out, number(line, 1, span)));
+        }
+        if is(line, s0, s1, "read") {
+            let id = number(line, 1, span);
+            let address = number(line, 2, span);
+            let count = number(line, 3, span);
+            return packet_or_error(io, out, feetech.read(out, id, address, count));
+        }
+        if is(line, s0, s1, "sync_read") {
+            let address = number(line, 1, span);
+            let count = number(line, 2, span);
+            let n = bytes_of(line, 3, span, data);
+            return packet_or_error(io, out, feetech.sync_read(out, address, count, data[0..n]));
+        }
+        if is(line, s0, s1, "write") || is(line, s0, s1, "reg_write") {
+            let id = number(line, 1, span);
+            let address = number(line, 2, span);
+            let n = bytes_of(line, 3, span, data);
+            token(line, 0, span);
+            if is(line, span[0], span[1], "write") {
+                return packet_or_error(io, out, feetech_write.write(out, id, address, data[0..n]));
+            }
+            return packet_or_error(io, out, feetech_write.reg_write(out, id, address, data[0..n]));
+        }
+        if is(line, s0, s1, "action") {
+            return packet_or_error(io, out, feetech_write.action(out, number(line, 1, span)));
+        }
+        if is(line, s0, s1, "sync_write") {
+            let address = number(line, 1, span);
+            let count = number(line, 2, span);
+            let n = bytes_of(line, 3, span, data);
+            return packet_or_error(io, out, feetech_write.sync_write(out, address, count, data[0..n]));
+        }
+        if is(line, s0, s1, "decode") {
+            let expected = number(line, 1, span);
+            let n = bytes_of(line, 2, span, data);
+            let r = feetech.decode(data[0..n], expected, table);
+            if r > 0 {
+                io.write_all(io, "OK ");
+                io.print_int(io, r);
+                var k = 0;
+                while k < feetech.slots() {
+                    putchar(io, ' ');
+                    io.print_int(io, table[k]);
+                    k = k + 1;
+                }
+            } else if r == feetech.need_more() {
+                io.write_all(io, "NEED");
+            } else {
+                io.write_all(io, "ERR ");
+                io.print_int(io, r);
+                putchar(io, ' ');
+                io.write_all(io, feetech.error_tag(r));
+            }
+            io.newline(io);
+            return 0;
+        }
+        io.write_all(io, "ERR unknown-command");
+        io.newline(io);
+    }
+    return 0;
+}
+
+fn run[&i](io: &!i Io) -> [io_read, io_write] int {
+    var more = true;
+    while more {
+        region a {
+            let line = alloc_slice[a](2048, byte_of(0));
+            var n = 0;
+            var c = getchar(io);
+            while c >= 0 && c != '\n' {
+                if n < len(line) {
+                    line[n] = byte_of(c);
+                    n = n + 1;
+                }
+                c = getchar(io);
+            }
+            if c < 0 && n == 0 {
+                more = false;
+            } else {
+                answer(io, line[0..n]);
+            }
+        }
+    }
+    return 0;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
+    release(net);
+    release(clock);
+    release(ffi);
+    release(fs);
+    release(heap);
+    release(args);
+    var status = 0;
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    release(io);
+    return status;
+}

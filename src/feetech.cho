@@ -1,0 +1,273 @@
+edition 5;
+
+module feetech;
+
+// `feetech` -- the Feetech SCS/STS serial protocol ("protocol 0" in LeRobot), the part this controller reads with:
+// build PING, READ and SYNC READ instruction packets, and decode a status packet. Task #4 of the epic; the
+// contract is `docs/design.md` sections 5 and 8 (gate C1).
+//
+// The wire format, little-endian data (STS):
+//
+//     instruction:  FF FF  id  length  instruction  parameters...  checksum
+//     status:       FF FF  id  length  error        parameters...  checksum
+//
+// `length` counts the parameters plus two (the instruction or error byte, and the checksum), and the checksum is
+// the low byte of the complement of the sum of every byte from `id` to the last parameter.
+//
+// **No write instruction is built here.** WRITE, REG WRITE, ACTION and SYNC WRITE live in `feetech_write`, so a
+// program that only reads (every tool before task #9) need not import anything that could move a servo, and a
+// gate can check which programs do.
+//
+// Sans-io: every function is pure (`[]`), allocates nothing, and never traps, whatever the bytes. Encoders write
+// into the caller's buffer and answer the packet's length, or a negative `error_*` rather than overrun. `decode`
+// answers how many bytes a complete status packet took, `need_more()` (0) if the bytes so far are a prefix of
+// one, or a negative `error_*`; on success it fills a table the caller owns (see `slots`).
+
+// ── the protocol's numbers (scservo_sdk's `scservo_def.py`) ─────────────────────────────────────────────────────
+
+pub fn header() -> [] int {
+    return 255;
+}
+
+pub fn broadcast_id() -> [] int {
+    return 254;
+}
+
+// The highest id a servo can have; 254 is broadcast, 255 is not an id.
+pub fn max_id() -> [] int {
+    return 253;
+}
+
+pub fn inst_ping() -> [] int {
+    return 1;
+}
+
+pub fn inst_read() -> [] int {
+    return 2;
+}
+
+pub fn inst_sync_read() -> [] int {
+    return 130;
+}
+
+// The longest packet either side sends (scservo_sdk's TXPACKET_MAX_LEN and RXPACKET_MAX_LEN).
+pub fn max_packet() -> [] int {
+    return 250;
+}
+
+// ── results ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+// Not an error: the bytes so far could still become a status packet.
+pub fn need_more() -> [] int {
+    return 0;
+}
+
+// A status packet whose checksum does not match its bytes.
+pub fn error_bad_checksum() -> [] int {
+    return -1;
+}
+
+// A well-formed status packet from another servo than the one asked.
+pub fn error_wrong_id() -> [] int {
+    return -2;
+}
+
+// A status packet whose length field is under 2 (it cannot hold the error byte and the checksum). scservo_sdk
+// does not refuse this; we do, deliberately (tests/differential_codec.py lists it).
+pub fn error_bad_length() -> [] int {
+    return -3;
+}
+
+// An instruction packet that would be longer than `max_packet()`, or than the caller's buffer.
+pub fn error_too_long() -> [] int {
+    return -4;
+}
+
+// An id out of range for that instruction: over `max_id()`, or broadcast where it means nothing (READ).
+pub fn error_bad_id() -> [] int {
+    return -5;
+}
+
+// An address, a count or a parameter byte out of 0..255, or a count of zero.
+pub fn error_bad_argument() -> [] int {
+    return -6;
+}
+
+pub fn error_tag(code: int) -> [] &static [byte] {
+    if code == error_bad_checksum() {
+        return "feetech.bad-checksum";
+    }
+    if code == error_wrong_id() {
+        return "feetech.wrong-id";
+    }
+    if code == error_bad_length() {
+        return "feetech.bad-length";
+    }
+    if code == error_too_long() {
+        return "feetech.too-long";
+    }
+    if code == error_bad_id() {
+        return "feetech.bad-id";
+    }
+    if code == error_bad_argument() {
+        return "feetech.bad-argument";
+    }
+    return "feetech.unknown";
+}
+
+// ── encoding ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+// The checksum over `buf[from..to]`: the low byte of the complement of the sum.
+pub fn checksum[&b](buf: &b [byte], from: int, to: int) -> [] int {
+    var sum = 0;
+    var i = from;
+    while i < to {
+        sum = sum + int_of(buf[i]);
+        i = i + 1;
+    }
+    return 255 - sum % 256;
+}
+
+fn is_byte(v: int) -> [] bool {
+    return v >= 0 && v <= 255;
+}
+
+// Frame `params` as an instruction packet in `out`. Private: the public builders below are the only instructions
+// this module can make.
+fn frame[&o, &p](out: &!o [byte], id: int, instr: int, params: &p [byte]) -> [] int {
+    let total = len(params) + 6;
+    if total > max_packet() || total > len(out) {
+        return error_too_long();
+    }
+    out[0] = byte_of(header());
+    out[1] = byte_of(header());
+    out[2] = byte_of(id);
+    out[3] = byte_of(len(params) + 2);
+    out[4] = byte_of(instr);
+    var i = 0;
+    while i < len(params) {
+        out[5 + i] = params[i];
+        i = i + 1;
+    }
+    out[total - 1] = byte_of(checksum(out, 2, total - 1));
+    return total;
+}
+
+// PING `id`. Not broadcast: every servo would answer at once and the replies would collide on the bus
+// (scservo_sdk refuses it too, as `COMM_NOT_AVAILABLE`, and tests/differential_codec.py checks both refuse).
+pub fn ping[&o](out: &!o [byte], id: int) -> [] int {
+    if id < 0 || id > max_id() {
+        return error_bad_id();
+    }
+    region a {
+        let none = alloc_slice[a](0, byte_of(0));
+        return frame(out, id, inst_ping(), none);
+    }
+}
+
+// READ `count` bytes from `address` of servo `id`.
+pub fn read[&o](out: &!o [byte], id: int, address: int, count: int) -> [] int {
+    if id < 0 || id > max_id() {
+        return error_bad_id();
+    }
+    if !is_byte(address) || !is_byte(count) || count == 0 {
+        return error_bad_argument();
+    }
+    region a {
+        let p = alloc_slice[a](2, byte_of(0));
+        p[0] = byte_of(address);
+        p[1] = byte_of(count);
+        return frame(out, id, inst_read(), p);
+    }
+}
+
+// SYNC READ `count` bytes from `address` of every servo in `ids` (one id per byte), sent to the broadcast id. Each
+// servo then answers with its own status packet, in the order of `ids`.
+pub fn sync_read[&o, &i](out: &!o [byte], address: int, count: int, ids: &i [byte]) -> [] int {
+    if !is_byte(address) || !is_byte(count) || count == 0 || len(ids) == 0 {
+        return error_bad_argument();
+    }
+    var k = 0;
+    while k < len(ids) {
+        if int_of(ids[k]) > max_id() {
+            return error_bad_id();
+        }
+        k = k + 1;
+    }
+    if len(ids) + 8 > max_packet() {
+        return error_too_long();
+    }
+    region a {
+        let p = alloc_slice[a](len(ids) + 2, byte_of(0));
+        p[0] = byte_of(address);
+        p[1] = byte_of(count);
+        var j = 0;
+        while j < len(ids) {
+            p[2 + j] = ids[j];
+            j = j + 1;
+        }
+        return frame(out, broadcast_id(), inst_sync_read(), p);
+    }
+}
+
+// ── decoding ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+// The table `decode` fills:  [0] id  [1] error byte  [2] where the parameters start  [3] how many there are
+// [4] how many bytes before the packet were skipped as noise.
+pub fn slots() -> [] int {
+    return 5;
+}
+
+// Decode the first status packet in `buf`, from servo `expected_id`.
+//
+// Mirrors scservo_sdk's `rxPacket` where it is right: bytes before an `FF FF` are skipped as noise, and an `FF FF`
+// followed by an impossible id (over 253), length (over 250) or error byte (over 127) is not a header -- one byte
+// is dropped and the search goes on. Differs, deliberately, where it is lax: a length under 2 is refused instead of
+// read as a short packet, and a packet from another id is refused instead of waited past (the caller asked one
+// servo; another one answering is a fault on the bus, not a delay).
+pub fn decode[&b, &t](buf: &b [byte], expected_id: int, table: &!t [int]) -> [] int {
+    let n = len(buf);
+    var start = 0;
+    while start + 1 < n {
+        if int_of(buf[start]) == header() && int_of(buf[start + 1]) == header() {
+            if start + 5 > n {
+                return need_more();
+            }
+            let id = int_of(buf[start + 2]);
+            let length = int_of(buf[start + 3]);
+            let error = int_of(buf[start + 4]);
+            if id > max_id() || length > max_packet() || error > 127 {
+                start = start + 1;
+            } else {
+                if length < 2 {
+                    return error_bad_length();
+                }
+                let end = start + length + 4;
+                if end > n {
+                    return need_more();
+                }
+                if int_of(buf[end - 1]) != checksum(buf, start + 2, end - 1) {
+                    return error_bad_checksum();
+                }
+                if id != expected_id {
+                    return error_wrong_id();
+                }
+                table[0] = id;
+                table[1] = error;
+                table[2] = start + 5;
+                table[3] = length - 2;
+                table[4] = start;
+                return end;
+            }
+        } else {
+            start = start + 1;
+        }
+    }
+    return need_more();
+}
+
+// A little-endian 16-bit value from `buf[at]` and `buf[at + 1]`, unsigned. (Sign conventions are per register and
+// belong to calibration, task #6.)
+pub fn u16[&b](buf: &b [byte], at: int) -> [] int {
+    return int_of(buf[at]) + 256 * int_of(buf[at + 1]);
+}

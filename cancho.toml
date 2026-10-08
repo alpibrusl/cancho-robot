@@ -1,0 +1,11 @@
+[package]
+name = "cancho-robot"
+cancho = "7bf3628c1089ed6e46d26062435267f8991d114f"   # the compiler these sources were written for
+
+# The test harness for the protocol codec (task #4): not shipped, but built and held to its own authority ceiling
+# (authority/driver.ceiling: standard input and output, nothing else).
+[[bin]]
+name = "driver"
+sources = ["src/feetech", "src/feetech_write", "tests/driver"]
+std = true
+out = "build/driver"
