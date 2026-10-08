@@ -1,0 +1,246 @@
+// Spike for cancho-robot#3, the LINUX variant (Raspberry Pi 5, Debian 13, glibc
+// 2.41, aarch64): open a Feetech servo bus at 1,000,000 baud from cancho and get
+// one servo to answer. On Linux 1,000,000 is a standard rate (B1000000, in the
+// CBAUD bits of c_cflag), so there is no ioctl and no variadic trap: compare
+// ping.cho, the macOS one. READ-ONLY: the only instructions this
+// program can build are PING (0x01) and READ (0x02); `packet` refuses
+// anything else, so a WRITE cannot be sent by a typo.
+//
+// Everything that configures the port is a foreign call, and it is written
+// the way cancho's FFI allows, which shaped every line below:
+//   * a `&[byte]` crosses to C as TWO arguments, a pointer and a length
+//     (docs/opaque-pointers.md). `open(path, flags)` would receive the length
+//     as its flags, so the path goes through `strdup` first and `open` takes
+//     the `c_ptr` it returns, one argument.
+//   * `cfsetspeed(t, speed)` would get the length where the speed belongs, so
+//     the speed bits and fields of `struct termios` are written into its bytes
+//     directly, at the offsets measured on the Pi (spikes/ping/abi_linux.c).
+//   * no `ioctl` here: on Linux the speed is a B-constant in `c_cflag`, and
+//     `tcsetattr` sets it (measured with spikes/ping/abi_linux.c).
+//   * `free` cannot be declared (the backend's own declaration collides), so
+//     the copy of the path is not freed.
+//   * C's `errno` cannot be read back (a `c_ptr` cannot be dereferenced), so
+//     a failure is reported through `perror`, which reads it in C.
+edition 5;
+
+import std.io;
+
+extern fn strdup[&f, &s](ffi: &f Ffi("libc"), s: &s [byte]) -> [ffi("libc")] c_ptr;
+extern fn open[&f](ffi: &f Ffi("libc"), path: c_ptr, flags: int) -> [ffi("libc")] c_int;
+extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] c_int;
+extern fn tcgetattr[&f, &b](ffi: &f Ffi("libc"), fd: int, t: &!b [byte]) -> [ffi("libc")] c_int;
+extern fn tcsetattr[&f, &b](ffi: &f Ffi("libc"), fd: int, action: int, t: &b [byte]) -> [ffi("libc")] c_int;
+extern fn cfmakeraw[&f, &b](ffi: &f Ffi("libc"), t: &!b [byte]) -> [ffi("libc")] int;
+extern fn tcflush[&f](ffi: &f Ffi("libc"), fd: int, queue: int) -> [ffi("libc")] c_int;
+extern fn read[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &!b [byte]) -> [ffi("libc")] int;
+extern fn write[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &b [byte]) -> [ffi("libc")] int;
+extern fn usleep[&f](ffi: &f Ffi("libc"), us: int) -> [ffi("libc")] c_int;
+extern fn perror[&f, &s](ffi: &f Ffi("libc"), s: &s [byte]) -> [ffi("libc")] int;
+
+// Measured with spikes/ping/abi_linux.c on the Pi (glibc 2.41, aarch64).
+fn o_rdwr() -> [] int { return 2; }
+fn o_noctty() -> [] int { return 256; }
+fn o_nonblock() -> [] int { return 2048; }
+fn termios_size() -> [] int { return 60; }
+fn cflag_at() -> [] int { return 8; }
+fn cc_at() -> [] int { return 17; }
+fn ispeed_at() -> [] int { return 52; }
+fn ospeed_at() -> [] int { return 56; }
+fn vmin() -> [] int { return 6; }
+fn vtime() -> [] int { return 5; }
+fn clocal() -> [] int { return 2048; }
+fn cread() -> [] int { return 128; }
+fn cbaud_mask() -> [] int { return 4111; }   // CBAUD 010017
+fn b1000000() -> [] int { return 4104; }     // B1000000 010010
+
+// Little-endian 4-byte fields of the termios buffer (tcflag_t and speed_t are 4 bytes on Linux).
+fn get_u64[&b](t: &b [byte], at: int) -> [] int {
+    var v = 0;
+    var i = 3;
+    while i >= 0 {
+        v = v * 256 + int_of(t[at + i]);
+        i = i - 1;
+    }
+    return v;
+}
+
+fn put_u64[&b](t: &!b [byte], at: int, value: int) -> [] int {
+    var v = value;
+    var i = 0;
+    while i < 4 {
+        t[at + i] = byte_of(v % 256);
+        v = v / 256;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// The one packet builder: PING and READ only. Answers the packet length, or
+// -1 for an instruction this read-only spike must never send.
+fn packet[&o](out: &!o [byte], id: int, instr: int, address: int, count: int) -> [] int {
+    if instr != 1 && instr != 2 {
+        return -1;
+    }
+    out[0] = byte_of(255);
+    out[1] = byte_of(255);
+    out[2] = byte_of(id);
+    var length = 2;
+    if instr == 2 {
+        length = 4;
+        out[5] = byte_of(address);
+        out[6] = byte_of(count);
+    }
+    out[3] = byte_of(length);
+    out[4] = byte_of(instr);
+    var sum = 0;
+    var i = 2;
+    while i < length + 3 {
+        sum = sum + int_of(out[i]);
+        i = i + 1;
+    }
+    out[length + 3] = byte_of(255 - sum % 256);
+    return length + 4;
+}
+
+fn hex_digit(d: int) -> [] int {
+    if d < 10 { return '0' + d; }
+    return 'a' + d - 10;
+}
+
+fn print_hex[&i, &b](io: &!i Io, bytes: &b [byte], n: int) -> [io_write] int {
+    var k = 0;
+    while k < n {
+        let v = int_of(bytes[k]);
+        putchar(io, hex_digit(v / 16));
+        putchar(io, hex_digit(v % 16));
+        putchar(io, ' ');
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn say[&i, &t](io: &!i Io, text: &t [byte]) -> [io_write] int {
+    return io.write_all(io, text);
+}
+
+// Write a packet, then collect a reply of `want` bytes for up to `tries` ms.
+// Answers how many bytes arrived.
+fn exchange[&f, &i, &p, &r](ffi: &f Ffi("libc"), io: &!i Io, fd: int, pkt: &p [byte], n: int, reply: &!r [byte], want: int, tries: int) -> [ffi("libc"), io_write] int {
+    tcflush(ffi, fd, 0);   // TCIFLUSH (0 on Linux): drop anything stale on the input side
+    let sent = write(ffi, fd, pkt[0..n]);
+    say(io, "  sent ");
+    print_hex(io, pkt, n);
+    say(io, "(");
+    io.print_int(io, sent);
+    say(io, " bytes)\n");
+    var got = 0;
+    var t = 0;
+    while got < want && t < tries {
+        let k = read(ffi, fd, reply[got..want]);
+        if k > 0 { got = got + k; }
+        if got < want { usleep(ffi, 1000); }
+        t = t + 1;
+    }
+    say(io, "  got  ");
+    print_hex(io, reply, got);
+    say(io, "(");
+    io.print_int(io, got);
+    say(io, " bytes after ~");
+    io.print_int(io, t);
+    say(io, " ms)\n");
+    return got;
+}
+
+fn spike[&f, &i](ffi: &f Ffi("libc"), io: &!i Io) -> [ffi("libc"), io_write] int {
+    let path = strdup(ffi, "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B61033220-if00\0");
+    let fd = open(ffi, path, o_rdwr() + o_noctty() + o_nonblock());
+    // Not freed: declaring `extern fn free` is refused by the LLVM backend
+    // ("invalid redefinition of function 'free'", the runtime declares it
+    // too). 29 bytes, once; see docs/research-log.md.
+    say(io, "open: fd ");
+    io.print_int(io, fd);
+    say(io, "\n");
+    if fd < 0 {
+        perror(ffi, "open\0");
+        return 2;
+    }
+    var status = 0;
+    region a {
+        let t = alloc_slice[a](termios_size(), byte_of(0));
+        if tcgetattr(ffi, fd, t) != 0 {
+            perror(ffi, "tcgetattr\0");
+            status = 3;
+        } else {
+            say(io, "before: ispeed ");
+            io.print_int(io, get_u64(t, ispeed_at()));
+            say(io, ", cflag ");
+            io.print_int(io, get_u64(t, cflag_at()));
+            say(io, "\n");
+            cfmakeraw(ffi, t);
+            // c_cflag: clear the speed bits, then B1000000, CLOCAL and CREAD (bit operators exist; the macOS
+            // spike divided because it was written before that was known).
+            let cf = get_u64(t, cflag_at());
+            put_u64(t, cflag_at(), (cf & ~cbaud_mask()) | b1000000() | clocal() | cread());
+            t[cc_at() + vmin()] = byte_of(0);
+            t[cc_at() + vtime()] = byte_of(0);
+            // glibc 2.41 keeps the B-constant in these two fields too (measured: 4104 after cfsetspeed).
+            put_u64(t, ispeed_at(), b1000000());
+            put_u64(t, ospeed_at(), b1000000());
+            let set = tcsetattr(ffi, fd, 0, t);
+            say(io, "tcsetattr at B1000000: ");
+            io.print_int(io, set);
+            say(io, "\n");
+            if set != 0 {
+                perror(ffi, "tcsetattr\0");
+                status = 4;
+            }
+            let back = alloc_slice[a](termios_size(), byte_of(0));
+            tcgetattr(ffi, fd, back);
+            // What the driver kept: the speed bits of c_cflag.
+            say(io, "after:  cflag ");
+            io.print_int(io, get_u64(back, cflag_at()));
+            say(io, ", speed bits ");
+            io.print_int(io, get_u64(back, cflag_at()) & cbaud_mask());
+            say(io, " (want 4104)");
+            say(io, "\n");
+
+            let pkt = alloc_slice[a](16, byte_of(0));
+            let reply = alloc_slice[a](16, byte_of(0));
+            say(io, "PING id 1\n");
+            let n = packet(pkt, 1, 1, 0, 0);
+            let got = exchange(ffi, io, fd, pkt, n, reply, 6, 50);
+            if got < 6 { status = status + 10; }
+
+            say(io, "READ id 1, Present_Position (56, 2 bytes)\n");
+            let m = packet(pkt, 1, 2, 56, 2);
+            let got2 = exchange(ffi, io, fd, pkt, m, reply, 8, 50);
+            if got2 >= 8 {
+                say(io, "  ticks ");
+                io.print_int(io, int_of(reply[5]) + 256 * int_of(reply[6]));
+                say(io, "\n");
+            } else {
+                status = status + 20;
+            }
+            say(io, "refused WRITE builder: ");
+            io.print_int(io, packet(pkt, 1, 3, 40, 1));
+            say(io, "\n");
+        }
+    }
+    close(ffi, fd);
+    return status;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
+    release(fs); release(heap); release(args); release(net); release(clock);
+    let libc = narrow(ffi, "libc");
+    var status = 1;
+    borrow libc as &f in {
+        borrow mut io as &!i in {
+            status = spike(f, i);
+        }
+    }
+    release(libc);
+    release(io);
+    return status;
+}
