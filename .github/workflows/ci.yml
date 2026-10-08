@@ -106,3 +106,30 @@ jobs:
       - name: Calibration driver authority is within its ceiling
         working-directory: robot
         run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/calibration_driver.ceiling tests/calibration_driver.cho src/calibration.cho
+
+      - name: The kinematic chain is what the URDF says (src/so101.cho is generated, not edited)
+        working-directory: robot
+        run: python3 scripts/gen_chain.py tests/fixtures/urdf/so101_new_calib.urdf --check src/so101.cho
+
+      - name: Kinematics tests (placo's zero pose, a rigid transform, the base axis, the conversion)
+        working-directory: robot
+        run: ../cancho/target/release/cancho test tests/kinematics_test.cho src/kinematics.cho src/so101.cho --std
+
+      - name: Build the kinematics driver
+        working-directory: robot
+        run: ../cancho/target/release/cancho build --std tests/kinematics_driver.cho src/kinematics.cho src/so101.cho -o build/kinematics_driver
+
+      - name: placo, the solver LeRobot's RobotKinematics wraps (MIT)
+        run: pip install placo==0.9.23
+
+      - name: Forward kinematics against placo (gate C4)
+        working-directory: robot
+        run: python3 tests/differential_kinematics.py build/kinematics_driver --cases 5000
+
+      - name: The kinematics gates can fail (each deliberately wrong kinematics is caught)
+        working-directory: robot
+        run: python3 tests/mutate_kinematics.py ../cancho/target/release/cancho python3
+
+      - name: Kinematics driver authority is within its ceiling
+        working-directory: robot
+        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/kinematics_driver.ceiling tests/kinematics_driver.cho src/kinematics.cho src/so101.cho
