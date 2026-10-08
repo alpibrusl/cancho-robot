@@ -1,0 +1,115 @@
+edition 5;
+
+module feetech_write;
+
+import feetech;
+
+// `feetech_write` -- the instructions that change a servo: WRITE, REG WRITE, ACTION and SYNC WRITE. Kept apart from
+// `feetech` on purpose (docs/design.md section 3): a program that only reads does not import this module, and gate
+// A3 checks that the controller's one importer is `serial`. Nothing here can send a byte; these are pure builders,
+// like the read side, and they refuse rather than overrun.
+
+pub fn inst_write() -> [] int {
+    return 3;
+}
+
+pub fn inst_reg_write() -> [] int {
+    return 4;
+}
+
+pub fn inst_action() -> [] int {
+    return 5;
+}
+
+pub fn inst_sync_write() -> [] int {
+    return 131;
+}
+
+fn is_byte(v: int) -> [] bool {
+    return v >= 0 && v <= 255;
+}
+
+// The same framing as `feetech`'s private one, kept private here too, so neither module exports a builder that
+// takes an arbitrary instruction.
+fn frame[&o, &p](out: &!o [byte], id: int, instr: int, prefix: &p [byte], body: &p [byte]) -> [] int {
+    let params = len(prefix) + len(body);
+    let total = params + 6;
+    if total > feetech.max_packet() || total > len(out) {
+        return feetech.error_too_long();
+    }
+    out[0] = byte_of(feetech.header());
+    out[1] = byte_of(feetech.header());
+    out[2] = byte_of(id);
+    out[3] = byte_of(params + 2);
+    out[4] = byte_of(instr);
+    var i = 0;
+    while i < len(prefix) {
+        out[5 + i] = prefix[i];
+        i = i + 1;
+    }
+    var j = 0;
+    while j < len(body) {
+        out[5 + len(prefix) + j] = body[j];
+        j = j + 1;
+    }
+    out[total - 1] = byte_of(feetech.checksum(out, 2, total - 1));
+    return total;
+}
+
+fn addressed[&o, &d](out: &!o [byte], id: int, instr: int, address: int, data: &d [byte]) -> [] int {
+    if id < 0 || id > feetech.broadcast_id() {
+        return feetech.error_bad_id();
+    }
+    if !is_byte(address) || len(data) == 0 {
+        return feetech.error_bad_argument();
+    }
+    region a {
+        let p = alloc_slice[a](1, byte_of(address));
+        return frame(out, id, instr, p, data);
+    }
+}
+
+// WRITE `data` at `address` of servo `id` (broadcast allowed: every servo takes it, none answers).
+pub fn write[&o, &d](out: &!o [byte], id: int, address: int, data: &d [byte]) -> [] int {
+    return addressed(out, id, inst_write(), address, data);
+}
+
+// REG WRITE: like WRITE, held by the servo until an ACTION.
+pub fn reg_write[&o, &d](out: &!o [byte], id: int, address: int, data: &d [byte]) -> [] int {
+    return addressed(out, id, inst_reg_write(), address, data);
+}
+
+// ACTION: every servo addressed applies what it was REG WRITTEN.
+pub fn action[&o](out: &!o [byte], id: int) -> [] int {
+    if id < 0 || id > feetech.broadcast_id() {
+        return feetech.error_bad_id();
+    }
+    region a {
+        let none = alloc_slice[a](0, byte_of(0));
+        return frame(out, id, inst_action(), none, none);
+    }
+}
+
+// SYNC WRITE `count` bytes at `address` of several servos in one packet, to the broadcast id. `blocks` is one block
+// per servo: its id, then `count` bytes.
+pub fn sync_write[&o, &b](out: &!o [byte], address: int, count: int, blocks: &b [byte]) -> [] int {
+    if !is_byte(address) || !is_byte(count) || count == 0 || len(blocks) == 0 {
+        return feetech.error_bad_argument();
+    }
+    if len(blocks) % (count + 1) != 0 {
+        return feetech.error_bad_argument();
+    }
+    var k = 0;
+    while k < len(blocks) {
+        if int_of(blocks[k]) > feetech.max_id() {
+            return feetech.error_bad_id();
+        }
+        k = k + count + 1;
+    }
+    region a {
+        let p = alloc_slice[a](2, byte_of(0));
+        p[0] = byte_of(address);
+        p[1] = byte_of(count);
+        return frame(out, feetech.broadcast_id(), inst_sync_write(), p, blocks);
+    }
+}

@@ -1,0 +1,3 @@
+# tests/ik_driver.cho with the ik solver: standard input and output, nothing else.
+io_read
+io_write

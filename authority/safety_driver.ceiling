@@ -1,0 +1,3 @@
+# tests/safety_driver.cho with the safety core: standard input and output, nothing else.
+io_read
+io_write
