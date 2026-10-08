@@ -1,0 +1,6 @@
+# tests/check_driver.cho with the check tool: standard input and output, and the heap its JSON
+# answers are built in. Nothing else. This is the proof that `check` sends nothing: no bus, no file, no
+# socket appears in the row.
+heap
+io_read
+io_write

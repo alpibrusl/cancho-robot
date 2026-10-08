@@ -38,3 +38,11 @@ name = "ik_driver"
 sources = ["src/ik", "src/kinematics", "src/so101", "tests/ik_driver"]
 std = true
 out = "build/ik_driver"
+
+# The `check` tool (task #12): what a motion would do, without sending anything. Held to its own ceiling
+# (authority/check_driver.ceiling) -- io only, which is the proof that no bus is reachable from here.
+[[bin]]
+name = "check"
+sources = ["src/rules", "src/check", "src/safety", "src/ik", "src/kinematics", "src/so101", "tests/check_driver"]
+std = true
+out = "build/check"

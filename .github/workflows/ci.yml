@@ -165,3 +165,18 @@ jobs:
       - name: Safety driver authority is within its ceiling
         working-directory: robot
         run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/safety_driver.ceiling tests/safety_driver.cho src/safety.cho src/kinematics.cho src/so101.cho
+      - name: The toolbox contract tests (the catalogue, the tags the design names)
+        working-directory: robot
+        run: ../cancho/target/release/cancho test tests/check_test.cho src/check.cho src/rules.cho src/safety.cho src/ik.cho src/kinematics.cho src/so101.cho --std
+      - name: Build the check tool
+        working-directory: robot
+        run: ../cancho/target/release/cancho build --std tests/check_driver.cho src/check.cho src/rules.cho src/safety.cho src/ik.cho src/kinematics.cho src/so101.cho -o build/check
+      - name: The toolbox contract, checked on the binary (task #12)
+        working-directory: robot
+        run: python3 tests/conformance_check.py build/check
+      - name: The toolbox gates can fail (each table drift is caught)
+        working-directory: robot
+        run: python3 tests/mutate_check.py ../cancho/target/release/cancho python3
+      - name: Check tool authority is within its ceiling (the proof it sends nothing)
+        working-directory: robot
+        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/check_driver.ceiling tests/check_driver.cho src/check.cho src/rules.cho src/safety.cho src/ik.cho src/kinematics.cho src/so101.cho

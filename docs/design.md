@@ -98,8 +98,7 @@ draw that line is in section 13.
 from LeRobot's files; forward and inverse kinematics; the safety core (section 6); terminal teleoperation by keyboard; the boundary to Python
 (section 7); `introspect`, `skill`, `rules` and `check`, errors as data with rule tags.
 
-**Not in v1** (task #15 records each): cameras, dataset writing, training and policies (they stay in Python behind section 7), the wheeled base
-and the tower (task #14), a real-time guarantee, Linux (the code is written for both platforms where it costs nothing; only darwin-aarch64 is
+**Not in v1** (the decision records are [docs/decisions.md](decisions.md), task #15): cameras, dataset writing, training and policies (they stay in Python behind section 7), the wheeled base and the tower (task #14), a real-time guarantee, Linux (the code is written for both platforms where it costs nothing; only darwin-aarch64 is
 run against hardware in v1).
 
 ## 5. Design
@@ -222,6 +221,16 @@ holds the single descent step to the Jacobian's own DLS prediction to [1e-9 rad]
 (placo's FK is the reference chain; placo's own single solve() near a singularity takes barely-descent
 steps of its soft-task weighting, so its step policy is not the oracle -- its kinematics are), and
 converged solves put the gripper at the target to [0.1 mm] or refuse honestly.
+
+R5's agent contract is done (branch `agent/toolbox`, one part of R5): the toolbox contract applied to the
+controller. `check` answers what a motion would do -- every check the core applies, named with its rule
+tag, the speed clamp reported as a clamp, the goals it would commit -- without sending anything: its
+authority ceiling is `heap, io_read, io_write` and nothing else, which is the proof, not a promise.
+`introspect` lists the rules, the bounds and the authority from the same tables the code runs on
+(`src/rules.cho` for the tags, `src/safety.cho`'s own functions for the bounds), `skill` says how to ask,
+errors are JSON with stable rule tags, and the conformance harness holds the three in agreement: every
+rule a refusal names is listed, every listed rule is reachable, the bounds introspect reports are the ones
+the core runs. Six mutants of the tables are killed.
 
 R3 is done (branch `safety/core`): `src/safety.cho` checks every motion through one `approve` -- joint limits
 from the calibration spans, the workspace bound in the arm's own frame with `ArmPoint`/`RobotPoint` as distinct
