@@ -1,0 +1,81 @@
+import std.test;
+import calibration;
+
+// `calibration` on this robot's own numbers (tests/fixtures/calibration/xle_right.json, the LEFT arm's profile --
+// the names are crossed on purpose on this unit) and on the edges LeRobot's arithmetic has. The bit-for-bit
+// comparison with LeRobot is tests/differential_calibration.py; these say what the numbers mean.
+
+fn test_the_middle_of_the_range_is_zero_degrees() -> [] int {
+    // shoulder_pan of the left arm: range 771..3065, so the middle is 1918.
+    test.assert(calibration.degrees(1918, 771, 3065) == 0.0);
+    test.assert_eq(calibration.ticks_of_degrees(0.0, 771, 3065), 1918);
+    return 0;
+}
+
+fn test_one_turn_is_360_degrees_and_degrees_are_not_clamped() -> [] int {
+    test.assert(calibration.degrees(1918 + 4095, 771, 3065) == 360.0);
+    test.assert(calibration.degrees(1918 - 4095, 771, 3065) == -360.0);
+    // far outside the calibrated range, and still an angle: LeRobot does not clamp DEGREES
+    test.assert(calibration.degrees(0, 771, 3065) < -150.0);
+    return 0;
+}
+
+fn test_the_spikes_reading_in_degrees() -> [] int {
+    // 1882 ticks, servo 1 of the left arm, read by the spike (task #3): 36 ticks below the middle.
+    let d = calibration.degrees(1882, 771, 3065);
+    test.assert(d < -3.16 && d > -3.17);
+    return 0;
+}
+
+fn test_going_back_truncates_toward_zero() -> [] int {
+    // mid 0.5: 0.0 degrees is 0.5 ticks, which truncates to 0, as Python's int() does
+    test.assert_eq(calibration.ticks_of_degrees(0.0, 0, 1), 0);
+    // -0.6 ticks below a mid of 0 truncates to 0, not -1
+    test.assert_eq(calibration.ticks_of_degrees(-0.6 * 360.0 / 4095.0, -1, 1), 0);
+    return 0;
+}
+
+fn test_the_gripper_percent_runs_from_min_to_max_and_is_clamped() -> [] int {
+    test.assert(calibration.percent(2048, 2048, 3453, false) == 0.0);
+    test.assert(calibration.percent(3453, 2048, 3453, false) == 100.0);
+    test.assert(calibration.percent(1000, 2048, 3453, false) == 0.0);
+    test.assert(calibration.percent(4000, 2048, 3453, false) == 100.0);
+    test.assert_eq(calibration.ticks_of_percent(100.0, 2048, 3453, false), 3453);
+    test.assert_eq(calibration.ticks_of_percent(150.0, 2048, 3453, false), 3453);
+    return 0;
+}
+
+fn test_drive_mode_flips_the_percent() -> [] int {
+    test.assert(calibration.percent(2048, 2048, 3453, true) == 100.0);
+    test.assert_eq(calibration.ticks_of_percent(100.0, 2048, 3453, true), 2048);
+    test.assert(calibration.signed_percent(2048, 2048, 3453, true) == 100.0);
+    test.assert(calibration.signed_percent(3453, 2048, 3453, false) == 100.0);
+    return 0;
+}
+
+fn test_an_inverted_range_lets_the_upper_bound_win() -> [] int {
+    // min(max_, max(min_, v)) with min_ above max_: the answer is max_ whatever v is.
+    test.assert(calibration.percent(10, 3000, 1000, false) == 100.0);
+    test.assert(calibration.percent(5000, 3000, 1000, false) == 100.0);
+    return 0;
+}
+
+fn test_a_range_with_no_width_is_not_usable() -> [] int {
+    test.assert(!calibration.usable(2000, 2000));
+    test.assert(calibration.usable(2000, 2001));
+    // LeRobot only refuses equal bounds; an inverted range is accepted (and clamps to its upper bound)
+    test.assert(calibration.usable(3000, 1000));
+    return 0;
+}
+
+fn test_sign_magnitude_both_ways() -> [] int {
+    test.assert_eq(calibration.decode_sign(32768 + 5, 15), -5);
+    test.assert_eq(calibration.decode_sign(5, 15), 5);
+    // bits above the sign bit are ignored
+    test.assert_eq(calibration.decode_sign(4096 + 2048 + 7, 11), -7);
+    test.assert_eq(calibration.encode_sign(-5, 15), 32773);
+    test.assert_eq(calibration.encode_sign(2047, 11), 2047);
+    test.assert_eq(calibration.encode_sign(-2047, 11), 2048 + 2047);
+    test.assert_eq(calibration.encode_sign(2048, 11), -1);
+    return 0;
+}

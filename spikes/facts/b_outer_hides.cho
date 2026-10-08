@@ -1,0 +1,11 @@
+edition 5;
+extern fn labs[&f](ffi: &f Ffi("libc"), n: int) -> [ffi("libc")] int;
+fn inner[&f](ffi: &f Ffi("libc")) -> [ffi("libc")] int { return labs(ffi, -3); }
+fn outer[&f](ffi: &f Ffi("libc")) -> [] int { return inner(ffi); }
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
+    release(io); release(fs); release(heap); release(args); release(net); release(clock);
+    let l = narrow(ffi, "libc"); var s = 1;
+    borrow l as &f in { s = outer(f) - 3; }
+    release(l); return s;
+}

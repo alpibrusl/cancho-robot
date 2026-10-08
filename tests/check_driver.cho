@@ -1,0 +1,64 @@
+edition 7;
+module check_main;
+import std.buffer;
+import std.io;
+import check;
+
+// The driver for the `check` tool (task #12): one JSON object per line in, one JSON object per line out,
+// the exit code of the first failing line. Standard input and output, nothing else -- the authority
+// ceiling is the proof that no bus, file or socket is reachable from here.
+
+fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io_read, io_write] int {
+    var status = 0;
+    var more = true;
+    while more {
+        region a {
+            let line = alloc_slice[a](1024, byte_of(0));
+            var n = 0;
+            var c = getchar(io);
+            while c >= 0 && c != '\n' {
+                if n < len(line) {
+                    line[n] = byte_of(c);
+                    n = n + 1;
+                }
+                c = getchar(io);
+            }
+            if c < 0 && n == 0 {
+                more = false;
+            } else {
+                region b {
+                    let (doc, code) = check.answer(heap, line[0..n]);
+                    borrow doc as &dd in {
+                        buffer.write(io, dd);
+                    }
+                    buffer.drop(heap, doc);
+                    putchar(io, '\n');
+                    if code != 0 && status == 0 {
+                        status = code;
+                    }
+                }
+            }
+        }
+    }
+    return status;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec } = split(world);
+    release(net);
+    release(clock);
+    release(ffi);
+    release(fs);
+    release(args);
+    release(signals);
+    release(exec);
+    var status = 0;
+    borrow mut heap as &!h in {
+        borrow mut io as &!i in {
+            status = run(h, i);
+        }
+    }
+    release(heap);
+    release(io);
+    return status;
+}
