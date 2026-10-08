@@ -41,11 +41,21 @@ at 64, `VMIN` 16, `VTIME` 17.
    filesystem"**, while it opens `/dev/cu.usbmodem5B610332201`. Reaching a device through `libc:open`
    is invisible as a device. This is the headline question, now measured: today the report cannot
    name the bus.
-7. **No servo answered**: PING and READ sent, 0 bytes back in 50 ms. The reference stack (scservo_sdk
-   on pyserial, same port, same packets) got no status packet either, on both buses, for ids 1, 2
-   and 6. So the bus side was silent to everyone: most likely the servo supply was off. **Not yet a
-   result about cancho.** To repeat with the servos powered.
+7. **No servo answered at first**: PING and READ sent, 0 bytes back in 50 ms; the reference stack
+   (scservo_sdk on pyserial, same port, same packets) got nothing either, on both buses. The servo
+   supply was off. **Corrected the same day, with the supply on:**
+8. **Servo 1 answered cancho.** PING `ff ff 01 02 01 fb` -> `ff ff 01 02 00 fc` (id 1, no error,
+   checksum right) in about 2 ms; READ of `Present_Position` (56, 2 bytes) -> `ff ff 01 04 00 5a 07 99`,
+   **1882 ticks, the same value the reference read from the same servo** straight after. 3 runs of 3.
+9. **Control, servos powered, 3 runs each**: with `ioctl` declared plainly the call answers 0, the
+   speed reads back as garbage and **no servo answers**; with the padded declaration the speed is
+   1,000,000 and every PING and READ is answered. So finding 4 is the whole difference between a
+   working and a silently dead bus.
+10. The right arm's bus (`/dev/cu.usbmodem5B3D0437151`) stayed silent to the reference too (ids 1
+    to 10) while the left one answered ids 1 to 8: a supply question on that side, not looked into.
 
-**What it changes.** Opening and configuring a serial port from cancho works today only through
-foreign calls, with two workarounds and one ABI hack, and the report cannot say which device. That
-is what cancho#387 asks about; findings 1, 2, 4 and 6 go there. Whether a servo answers is still open.
+**What it changes.** **Viable, with caveats that are the research.** A servo answers a cancho program
+at 1 Mbaud, with the same reading as the reference. But today that takes foreign calls, two
+workarounds (`strdup` for a C string, termios written by hand) and one ABI hack (a variadic `ioctl`
+that otherwise fails *silently*), and the report cannot say which device it reaches. Findings 1, 2,
+4, 5 and 6 go to cancho#387; finding 2 is filed as a compiler bug.
