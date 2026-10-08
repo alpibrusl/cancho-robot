@@ -47,7 +47,8 @@ def caught(cancho, python, tree):
 
 
 def main():
-    cancho, python = sys.argv[1], sys.argv[2]
+    # Absolute: each mutant is built in a temporary copy, where a path relative to the checkout means nothing.
+    cancho, python = str(Path(sys.argv[1]).resolve()), sys.argv[2]
     missed = []
     for before, after, what in MUTANTS:
         with tempfile.TemporaryDirectory() as tmp:
