@@ -670,10 +670,12 @@ pub fn deadman_holds(since_ms: int) -> [] bool {
 
 // ── approve ──────────────────────────────────────────────────────────────────────────────────────────────
 
-// How far a reading may wander between two reads of a still joint: a request that keeps an out-of-span joint
-// where it is must not be refused for the encoder's last tick (one tick is 0.09 degrees).
+// How far a held goal and the joint's reading may differ while the joint is still: a request that keeps an
+// out-of-span joint where it was asked to be must not be refused because the servo settled short of it. Measured on
+// the robot on 2026-10-12: under load the servos settle 0.8 to 1.0 degree from their goal (the right wrist held at
+// -76.3 read -75.7, and a 0.5-degree slack refused every move of that arm).
 pub fn limit_slack_deg() -> [] float {
-    return 0.5;
+    return 1.5;
 }
 
 // One joint's request against its span [low, high], from where it is: inside the span, or, when the joint is already

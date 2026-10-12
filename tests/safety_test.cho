@@ -81,13 +81,14 @@ fn test_a_joint_resting_past_its_span_may_stay_or_come_back_never_go_further() -
     let high = 90.5;
     test.assert(safety.joint_allowed(-91.2, -91.2, low, high)); // stays
     test.assert(safety.joint_allowed(-91.5, -91.2, low, high)); // a reading's flicker below
+    test.assert(safety.joint_allowed(-76.3, -75.7, -75.3, 75.3)); // the held goal past where the servo settled (measured)
     test.assert(safety.joint_allowed(-90.0, -91.2, low, high)); // back inside
     test.assert(safety.joint_allowed(-90.9, -91.2, low, high)); // toward the span, still outside
-    test.assert(!safety.joint_allowed(-92.0, -91.2, low, high)); // further out
+    test.assert(!safety.joint_allowed(-93.0, -91.2, low, high)); // further out than the slack
     test.assert(!safety.joint_allowed(91.0, -91.2, low, high)); // past the other end
     test.assert(!safety.joint_allowed(-91.0, 0.0, low, high)); // from inside, out: refused as before
     test.assert(safety.joint_allowed(91.0, 91.4, low, high)); // the same above the span
-    test.assert(!safety.joint_allowed(92.0, 91.4, low, high));
+    test.assert(!safety.joint_allowed(93.0, 91.4, low, high));
     test.assert(!safety.joint_allowed(90.8, 90.4, low, high)); // from inside, past the top by less than the slack
     test.assert(!safety.joint_allowed(-90.8, -90.4, low, high)); // and past the floor
     return 0;
