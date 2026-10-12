@@ -130,6 +130,43 @@ fn test_a_pose_already_touching_may_move_away_but_not_closer_nor_into_something_
     return 0;
 }
 
+fn test_a_gripper_resting_outside_the_workspace_may_come_back_never_go_further() -> [] int {
+    // The right arm's rest pose on 2026-10-12 puts the gripper 2.4 mm outside the bound. From there the arm may stay
+    // or move back in (wrist -91.1 is inside); a request further out (wrist -111.1, 28.6 mm) is refused, and so is
+    // leaving the bound from inside it. approve applies it with spans wide enough that only the bound decides.
+    region a {
+        let rest = alloc_slice[a](5, 0.0);
+        let back = alloc_slice[a](5, 0.0);
+        let further = alloc_slice[a](5, 0.0);
+        let zero = alloc_slice[a](5, 0.0);
+        let goals = alloc_slice[a](5, 0.0);
+        request(-2.9, -102.4, 96.4, -101.1, 3.3, rest, goals);
+        request(-2.9, -102.4, 96.4, -91.1, 3.3, back, goals);
+        request(-2.9, -102.4, 96.4, -111.1, 3.3, further, goals);
+        test.assert(safety.workspace_excess(rest) > 0.002);
+        test.assert(safety.workspace_allowed(rest, rest));
+        test.assert(safety.workspace_allowed(back, rest));
+        test.assert(!safety.workspace_allowed(further, rest));
+        test.assert(!safety.workspace_allowed(rest, zero));
+        let wide = alloc_slice[a](10, 0.0);
+        var k = 0;
+        while k < 5 {
+            wide[k * 2] = -170.0;
+            wide[k * 2 + 1] = 170.0;
+            k = k + 1;
+        }
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        let other = alloc_slice[a](0, 0.0);
+        let m = safety.Mount { x: -0.135, y: -0.133, z: 0.76, yaw_deg: 0.0 };
+        borrow m as &mm in {
+            test.assert_eq(safety.approve(rest, rest, wide, mm, other, 0, 100, goals, scale, joint), safety.rule_ok());
+            test.assert_eq(safety.approve(further, rest, wide, mm, other, 0, 100, goals, scale, joint), safety.rule_workspace());
+        }
+    }
+    return 0;
+}
+
 fn test_a_gripper_outside_the_workspace_is_refused_with_limit_workspace() -> [] int {
     region a {
         let req = alloc_slice[a](5, 0.0);
