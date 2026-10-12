@@ -45,19 +45,25 @@ very claim the report makes.
 **Revisit when:** never for the bounds; for inference, only if cancho gains a proven numeric runtime and
 the measurement shows the boundary costs a control loop latency that matters.
 
-## Both platforms are in v1; which one drives the arms is open
+## The controller is the Raspberry Pi 5
 
-**Decision:** the code is written for darwin-aarch64 and Linux aarch64 alike. The spike opened the bus at
-1 Mbaud from cancho on both (research log, 2026-10-08): the Mac Studio needs the `IOSSIOSPEED` ioctl
-declared as variadic, the Raspberry Pi 5 (Debian 13, glibc 2.41) takes `tcsetattr` with `B1000000` alone,
-and the Pi ran it on both backends (Cranelift and LLVM). CI already runs on Linux (x86-64, no hardware).
+**Decision** (the maintainer, 2026-10-12): the program that owns the servo buses runs on the robot's Raspberry
+Pi 5 (Debian 13, glibc 2.41, aarch64). Every hardware gate and the measurements of design section 9 run there.
+The code stays portable to darwin-aarch64 where that costs nothing; the spike opened the bus on both.
 
-**Open:** which machine is the controller that drives the arms. The Pi is dedicated to the robot (one
-program per bus is easier to keep there); the Mac Studio is where lex-robot runs today. That is the
-maintainer's choice, not this record's; until it is made, every hardware gate is run on both.
+**Reason:** the Pi is dedicated to the robot, so "one program per bus" (design section 11) is a property of
+the machine rather than a discipline on a shared desktop: lex-robot's sidecar, LeLab and `practice.sh` live on
+the Mac. On Linux, 1 Mbaud is a standard rate (`B1000000` in `tcsetattr`), so the variadic `IOSSIOSPEED`
+ioctl -- the trap that set a silent garbage speed on darwin -- is not on the controller's path, and its
+foreign-symbol list is one shorter. Both backends (Cranelift and LLVM) build and run there; the 63 cancho tests
+pass on it.
 
-**Revisit when:** the maintainer picks the controller, or the timing measurement (section 9) shows one of
-the two cannot keep the loop.
+**Cost:** the Pi is on Wi-Fi (7-157 ms measured), which matters for a client driving it remotely and not for
+the bus. Its timing budget is unmeasured until #13; that measurement decides whether v1's single-threaded
+loop (design section 13, question 5) holds there.
+
+**Revisit when:** the Pi cannot keep the loop's rate (section 9), or a reason appears to run the controller on
+the machine that runs the cameras.
 
 ## A real-time guarantee is not in v1
 

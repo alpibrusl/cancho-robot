@@ -99,9 +99,9 @@ from LeRobot's files; forward and inverse kinematics; the safety core (section 6
 (section 7); `introspect`, `skill`, `rules` and `check`, errors as data with rule tags.
 
 **Not in v1** (the decision records are [docs/decisions.md](decisions.md), task #15): cameras, dataset writing, training and policies (they
-stay in Python behind section 7), the wheeled base and the tower (task #14), a real-time guarantee. Both platforms are in: the spike opened the
-bus at 1 Mbaud on darwin-aarch64 (Mac Studio) and on Linux aarch64 (Raspberry Pi 5, both backends); which of the two drives the arms is open
-(docs/decisions.md).
+stay in Python behind section 7), the wheeled base and the tower (task #14), a real-time guarantee. **The controller is the Raspberry Pi 5** (Linux
+aarch64, decided by the maintainer on 2026-10-12, docs/decisions.md): the hardware gates and the measurements of section 9 run there. The code
+stays portable to darwin-aarch64, where the spike also opened the bus, at no extra cost.
 
 ## 5. Design
 
