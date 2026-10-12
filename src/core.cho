@@ -67,8 +67,28 @@ pub fn timeout_us() -> [] int {
 
 // ── reading ──────────────────────────────────────────────────────────────────────────────────────────────
 
-// One register of `count` (1 or 2) bytes from servo `id`, unsigned, or a negative error.
+// How many times a read is tried before the bus counts as failed. A read moves nothing, so trying again is safe,
+// and `serial.transact` drops a late answer to the previous try; a write is never retried. LeRobot retries reads for
+// the same reason: one late reply on a busy bus (measured: the simulated bus on a loaded CI runner) is not a fault.
+pub fn read_tries() -> [] int {
+    return 3;
+}
+
+// One register of `count` (1 or 2) bytes from servo `id`, unsigned, or the last try's negative error.
 pub fn read_register[&f](ffi: &f Ffi("libc"), fd: int, id: int, address: int, count: int) -> [ffi("libc")] int {
+    var value = -1;
+    var t = 0;
+    while t < read_tries() {
+        value = read_once(ffi, fd, id, address, count);
+        if value >= 0 {
+            return value;
+        }
+        t = t + 1;
+    }
+    return value;
+}
+
+fn read_once[&f](ffi: &f Ffi("libc"), fd: int, id: int, address: int, count: int) -> [ffi("libc")] int {
     var value = 0;
     region a {
         let pkt = alloc_slice[a](16, byte_of(0));
