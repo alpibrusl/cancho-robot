@@ -112,6 +112,8 @@ def main():
                     ticks.append((c["last"], r["first"]))
                     if abs(c["last"] - r["first"]) > args.tolerance:
                         problems.append(f"{name} id {ident}: cancho read {c['last']}, the reference {r['first']}")
+            if not c_ok and not r_ok:
+                problems.append(f"{name} id {ident}: nobody answers (servo power off, a cable, or the wrong id)")
             if c_ok and not r_ok:
                 problems.append(f"{name} id {ident}: cancho reads it, the reference never does")
             if r_ok and not c_ok:
