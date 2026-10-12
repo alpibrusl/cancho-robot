@@ -339,7 +339,7 @@ fn run_move[&f, &i, &d, &h, &t](ffi: &f Ffi("libc"), io: &!i Io, fds: &d [int], 
                     done = true;
                 } else if since_better >= 50 {
                     say(io, "  stalled: a joint is held back; holding where it is\n");
-                    let rule = core.commit(ffi, fd, side, present, present, other5[0..n], 0, 20, goals, joint);
+                    let rule = core.commit(ffi, fd, side, present, present, present, other5[0..n], 0, 20, goals, joint);
                     if rule == safety.rule_ok() {
                         var c = 0;
                         while c < robot.joints() {
@@ -363,15 +363,17 @@ fn run_move[&f, &i, &d, &h, &t](ffi: &f Ffi("libc"), io: &!i Io, fds: &d [int], 
                         request[j] = clamp_lead(toward(held[base + j], target[j], step), present[j], most);
                         j = j + 1;
                     }
-                    let rule = core.commit(ffi, fd, side, request, present, other5[0..n], 0, 20, goals, joint);
+                    let rule = core.commit(ffi, fd, side, request, present, held[base..base + robot.joints()], other5[0..n], 0, 20, goals, joint);
                     if rule != safety.rule_ok() {
                         refusal(io, rule, joint[0]);
                         result = rule;
                         done = true;
                     } else {
+                        // Held: the goals written, which advance from the last ones (core.commit), so a joint that
+                        // is not moving keeps its goal and one that is gets there at the commanded speed.
                         var c = 0;
                         while c < robot.joints() {
-                            held[base + c] = request[c];
+                            held[base + c] = goals[c];
                             c = c + 1;
                         }
                         serial.sleep_us(ffi, 20000);

@@ -11,6 +11,9 @@ What it models, and what it does not:
   Present_Position (56), Present_Load (60), Present_Voltage (62), Present_Temperature (63), Moving (66);
 - a servo with torque on moves its position toward its goal at the STS3215's no-load speed (about 3,000 ticks/s);
   with torque off it stays where it is (no gravity: an arm that sags on the robot will not sag here);
+- static friction (`--breakaway TICKS`): a servo whose error is below that does not move, so it settles short of
+  its goal as the robot's do (0.8 to 1.0 degree, measured 2026-10-12), and a goal that stays only a little ahead of
+  a still servo never moves it;
 - an obstacle (`--obstacle left:2:2300`): that joint cannot pass that tick; pushing against it shows as load,
   which is how the stall gate is exercised without hurting a servo;
 - each arm servo stores its calibration (Homing_Offset 31, Min/Max_Position_Limit 9 and 11) from LeRobot's files,
@@ -78,6 +81,7 @@ class Servo:
         self.position = float(position)
         self.pending = None  # a REG WRITE waiting for ACTION
         self.obstacle = None
+        self.breakaway = 0  # ticks of error the servo needs before it moves (static friction at a low P gain)
         self.mem[PRESENT_VOLTAGE] = 120  # 12.0 V
         self.mem[PRESENT_TEMPERATURE] = 30
         self._store(GOAL_POSITION, int(position))
@@ -95,6 +99,8 @@ class Servo:
         moving = 0
         if self.mem[TORQUE_ENABLE]:
             target = max(0, min(4095, self.goal()))
+            if abs(target - self.position) <= self.breakaway:
+                target = self.position  # not enough error to overcome friction: it stays (and settles short)
             room = TICKS_PER_S * dt
             delta = max(-room, min(room, target - self.position))
             nxt = self.position + delta
@@ -224,11 +230,16 @@ def main():
     ap.add_argument("--trace", type=Path)
     ap.add_argument("--obstacle", action="append", default=[], metavar="BUS:ID:TICK")
     ap.add_argument("--crossed", action="store_true", help="each arm on the other bus")
+    ap.add_argument("--breakaway", type=int, default=0, metavar="TICKS",
+                    help="error a servo needs before it moves; the robot's settle 0.8-1.0 degree short (about 10 ticks)")
     args = ap.parse_args()
     args.dir.mkdir(parents=True, exist_ok=True)
     trace = open(args.trace, "a") if args.trace else None
     arms = {"left": "right", "right": "left"} if args.crossed else {"left": "left", "right": "right"}
     buses = [Bus(n, args.dir / n, arms[n], trace) for n in ("left", "right")]
+    for b in buses:
+        for servo in b.servos.values():
+            servo.breakaway = args.breakaway
     for spec in args.obstacle:
         name, ident, tick = spec.split(":")
         next(b for b in buses if b.name == name).servos[int(ident)].obstacle = int(tick)

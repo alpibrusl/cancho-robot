@@ -266,7 +266,12 @@ pub fn lead(goal: float, present: float, most: float) -> [] float {
 // (the arm's present pose, same units), with the other arm at `other` (its five joint angles, or empty), and
 // commit the approved goals. Answers rule_ok() when the goals were written -- `goals` then holds them -- or the
 // rule the request was refused with, in which case NOTHING was sent. `joint` names the refused joint, or -1.
-pub fn commit[&f, &r, &c, &o, &g, &j](ffi: &f Ffi("libc"), fd: int, side: int, request: &r [float], current: &c [float], other: &o [float], since_ms: int, dt_ms: int, goals: &!g [float], joint: &!j [int]) -> [ffi("libc")] int {
+//
+// The speed limit is the speed of the COMMANDED trajectory: the goal advances from `previous` (the goals last
+// written) toward the request by at most what limit.speed allows in `dt_ms`. Interpolating from the present
+// position instead (what `approve` itself answers) kept the goal a degree ahead of a still arm: on the robot an
+// elbow under load, at the servo's low gain, never broke away, and the move stalled (2026-10-12).
+pub fn commit[&f, &r, &c, &p, &o, &g, &j](ffi: &f Ffi("libc"), fd: int, side: int, request: &r [float], current: &c [float], previous: &p [float], other: &o [float], since_ms: int, dt_ms: int, goals: &!g [float], joint: &!j [int]) -> [ffi("libc")] int {
     var rule = safety.rule_ok();
     region a {
         let limits = alloc_slice[a](robot.gripper() * 2, 0.0);
@@ -281,9 +286,10 @@ pub fn commit[&f, &r, &c, &o, &g, &j](ffi: &f Ffi("libc"), fd: int, side: int, r
             let ticks = alloc_slice[a](robot.joints(), 0);
             let ids = alloc_slice[a](robot.joints(), 0);
             ids_of(side, ids);
+            let step = safety.speed_scale(previous, request, dt_ms);
             var k = 0;
             while k < robot.gripper() {
-                goals[k] = lead(arm[k], current[k], lead_deg());
+                goals[k] = lead(previous[k] + (request[k] - previous[k]) * step, current[k], lead_deg());
                 ticks[k] = calibration.ticks_of_degrees(goals[k], robot.range_min(side, k), robot.range_max(side, k));
                 k = k + 1;
             }

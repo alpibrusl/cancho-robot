@@ -41,6 +41,9 @@ def build_mutants():
             "torque disabled where it should be enabled"),
         one("src/serial_write.cho", "            let raw = calibration.encode_sign(ticks[k], calibration.sign_bit_position());",
             "            let raw = ticks[k] + 40;", "goals written 40 ticks off what was approved"),
+        one("src/core.cho", "                goals[k] = lead(previous[k] + (request[k] - previous[k]) * step, current[k], lead_deg());",
+            "                goals[k] = lead(arm[k], current[k], lead_deg());",
+            "the speed limit interpolated from the present position (the elbow stall)"),
     ]
 
 

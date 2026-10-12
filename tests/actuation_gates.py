@@ -161,6 +161,14 @@ def main():
     if not ok:
         print("  the session:\n    " + "\n    ".join(out.splitlines()))
 
+    # G7: with static friction (the robot's servos settle about 10 ticks short), a joint under the speed limit still
+    # gets there: the goal advances from the last goal, not from the present position (2026-10-12, the right elbow
+    # stalled on the robot when the goal was kept a degree ahead of a still servo).
+    out, rows = run_session(play, ["torque r on", "move r elbow -10", "move r elbow 8"], ["--breakaway", "12"], workdir)
+    arrived = out.count("  done,")
+    gate("G7 a move under the speed limit overcomes static friction", arrived == 2 and "stalled" not in out,
+         [l for l in out.splitlines() if "done" in l or "stalled" in l or "refused" in l])
+
     if failures:
         print(f"actuation: {len(failures)} gate(s) failed: {failures}")
         return 1
