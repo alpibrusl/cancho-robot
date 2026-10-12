@@ -583,6 +583,24 @@ pub fn deadman_holds(since_ms: int) -> [] bool {
 
 // ── approve ──────────────────────────────────────────────────────────────────────────────────────────────
 
+// How far a reading may wander between two reads of a still joint: a request that keeps an out-of-span joint
+// where it is must not be refused for the encoder's last tick (one tick is 0.09 degrees).
+pub fn limit_slack_deg() -> [] float {
+    return 0.5;
+}
+
+// One joint's request against its span [low, high], from where it is: inside the span, or, when the joint is already
+// outside it, on the same side and no further out than `current` (plus the reading's slack).
+pub fn joint_allowed(request: float, current: float, low: float, high: float) -> [] bool {
+    if request >= low && request <= high {
+        return true;
+    }
+    if request < low {
+        return current < low && request >= current - limit_slack_deg();
+    }
+    return current > high && request <= current + limit_slack_deg();
+}
+
 // The one function every motion goes through. `request` is the five goal angles (degrees, LeRobot's), `current`
 // the arm's present angles, `limits` the measured joint limits (min, max per joint), `mount` the arm's mount,
 // `other` the other arm's present angles if it is on the robot, `since_ms` the time since the last fresh request
@@ -611,10 +629,12 @@ pub fn approve[&r, &c, &l, &m, &g, &s, &j, &o](request: &r [float], current: &c 
     if len(request) < so101.moving() || len(limits) < so101.moving() * 2 {
         return rule_joint();
     }
-    // limit.joint: the request's angles are inside the measured spans.
+    // limit.joint: the request's angles are inside the measured spans -- or, for a joint the arm is already past
+    // (its rest pose can fold a little beyond what calibration swept), no further out than it is now, so the
+    // arm can leave rest by moving that joint back toward its span or by leaving it where it is.
     var i = 0;
     while i < so101.moving() {
-        if request[i] < limits[i * 2] || request[i] > limits[i * 2 + 1] {
+        if !joint_allowed(request[i], current[i], limits[i * 2], limits[i * 2 + 1]) {
             joint[0] = i;
             return rule_joint();
         }

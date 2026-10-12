@@ -73,6 +73,26 @@ fn test_a_request_outside_the_joint_limits_is_refused_with_limit_joint() -> [] i
     return 0;
 }
 
+fn test_a_joint_resting_past_its_span_may_stay_or_come_back_never_go_further() -> [] int {
+    // The arms rest folded a little past what calibration swept (on 2026-10-12: lift -91.2 against a -90.5 floor).
+    // From there a request may keep the joint where it is (within a reading's slack) or bring it back toward the
+    // span; one that takes it further out is refused, and so is one past the OTHER end.
+    let low = -90.5;
+    let high = 90.5;
+    test.assert(safety.joint_allowed(-91.2, -91.2, low, high)); // stays
+    test.assert(safety.joint_allowed(-91.5, -91.2, low, high)); // a reading's flicker below
+    test.assert(safety.joint_allowed(-90.0, -91.2, low, high)); // back inside
+    test.assert(safety.joint_allowed(-90.9, -91.2, low, high)); // toward the span, still outside
+    test.assert(!safety.joint_allowed(-92.0, -91.2, low, high)); // further out
+    test.assert(!safety.joint_allowed(91.0, -91.2, low, high)); // past the other end
+    test.assert(!safety.joint_allowed(-91.0, 0.0, low, high)); // from inside, out: refused as before
+    test.assert(safety.joint_allowed(91.0, 91.4, low, high)); // the same above the span
+    test.assert(!safety.joint_allowed(92.0, 91.4, low, high));
+    test.assert(!safety.joint_allowed(90.8, 90.4, low, high)); // from inside, past the top by less than the slack
+    test.assert(!safety.joint_allowed(-90.8, -90.4, low, high)); // and past the floor
+    return 0;
+}
+
 fn test_a_gripper_outside_the_workspace_is_refused_with_limit_workspace() -> [] int {
     region a {
         let req = alloc_slice[a](5, 0.0);
