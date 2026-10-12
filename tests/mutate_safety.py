@@ -3,7 +3,8 @@
 (tests/safety_test.cho) or by the differential against lex-robot's model (tests/differential_safety.py).
 
 One mutant per check (docs/design.md section 6): the joint limits widened, the workspace bound loosened, the
-jump bound relaxed, a collision distance sign, the tray's box, the margin, the speed limit, the deadman bound.
+jump bound relaxed, a collision distance sign, the cart's box (its size, its axes, the distance along a
+link, the depth inside it, the link's radius), the margin, the speed limit, the deadman bound.
 
 Usage:  python3 tests/mutate_safety.py path/to/cancho python3 --collision-py DIR
 """
@@ -51,12 +52,24 @@ def build_mutants():
         one("    // limit.joint: the request's angles are inside the measured spans.\n    var i = 0;\n    while i < so101.moving() {",
             "    // limit.joint: the request's angles are inside the measured spans.\n    var i = 0;\n    while i < 0 {",
             "the joint limits never checked"),
-        one("pub fn tray_half_x() -> [] float {\n    return 0.225;\n}",
+        one("pub fn tray_half_x() -> [] float {\n    return 0.175;\n}",
             "pub fn tray_half_x() -> [] float {\n    return 100.0;\n}",
             "the tray's box footprint made everything a tray hit"),
-        one("pub fn tray_half_y() -> [] float {\n    return 0.175;\n}",
+        one("pub fn tray_half_y() -> [] float {\n    return 0.225;\n}",
             "pub fn tray_half_y() -> [] float {\n    return 100.0;\n}",
             "the tray's box footprint widened over the whole floor"),
+        one("pub fn tray_half_x() -> [] float {\n    return 0.175;\n}",
+            "pub fn tray_half_x() -> [] float {\n    return 0.225;\n}",
+            "the footprint's long side put fore-aft (the axes lex-robot reads swapped)"),
+        one("    while k < 100 {\n        let t1",
+            "    while k < 0 {\n        let t1",
+            "the cart distance taken at the segment's ends and middle only, not minimised along it"),
+        one("    if inner > 0.0 {\n        inner = 0.0;\n    }",
+            "    if inner > 0.0 {\n        inner = 0.0;\n    }\n    inner = 0.0;",
+            "a link inside the cart counted as touching its surface, not as deep as it is"),
+        one("    return best - c.radius;",
+            "    return best;",
+            "the link's radius left out of the cart clearance"),
         one("    var j = 1;\n    while j < len(caps) {",
             "    var j = 1;\n    while j < 0 {",
             "the other arm never checked"),

@@ -11,6 +11,8 @@ import so101;
 //
 // Answers one line of eight integers: the rule, the joint index, and the five approved goals (or the held pose
 // on a deadman), each float as its 64 bits. Standard input and output, nothing else.
+//
+//     tray <side> <q 5>      the cart clearance of each of the arm's capsules, as 64-bit float bits, one line
 
 fn token[&l, &s](line: &l [byte], k: int, span: &!s [int]) -> [] bool {
     var i = 0;
@@ -125,6 +127,43 @@ fn answer[&i, &l](io: &!i Io, line: &l [byte]) -> [io_write] int {
                     }
                 }
             }
+            return 0;
+        }
+        // `tray <side> <q 5>`: each capsule's clearance from the cart's box, what the differential holds to
+        // lex-robot's sampled box distance.
+        if token(line, 0, span) && is(line, span[0], span[1], "tray") {
+            let left = int_of(line[5]) == 'l';
+            let q = alloc_slice[a](5, 0.0);
+            var k = 0;
+            while k < 5 {
+                q[k] = float_of_bits(number(line, 2 + k, span));
+                k = k + 1;
+            }
+            var y = 0.133;
+            if !left {
+                y = -0.133;
+            }
+            let mount = safety.Mount { x: -0.135, y: y, z: 0.76, yaw_deg: 0.0 };
+            let caps = alloc_slice[a](6, safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+            borrow mount as &m in {
+                if safety.arm_capsules(q, m, caps) != 0 {
+                    io.print_int(io, -1);
+                    io.newline(io);
+                    return 0;
+                }
+            }
+            var i = 0;
+            while i < len(caps) {
+                if i > 0 {
+                    putchar(io, ' ');
+                }
+                let c = caps[i];
+                borrow c as &cc in {
+                    io.print_int(io, bits_of(safety.tray_clearance(cc)));
+                }
+                i = i + 1;
+            }
+            io.newline(io);
             return 0;
         }
         let cur = alloc_slice[a](5, 0.0);

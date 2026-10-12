@@ -2,15 +2,20 @@
 """Gate C5 (docs/design.md section 8): the safety core against lex-robot's Python checks on the same poses.
 
 The reference is lex-robot's sidecar/collision.py (`RobotCollisionModel.from_json` on the same URDF and the same
-robot_geometry.json), which is the model lex-robot's guard runs today. For each case: both models are asked about
-the same requested pose, and the verdict (which rule, or clear) must be the same.
+robot_geometry.json), at lex-robot#218 (branch fix/workspace-frames, pinned by commit in CI): there the cart is a
+box from the floor to tray_z over the tray's footprint, as it is here (docs/design.md section 6). lex-robot's main
+still checks an infinite plane at tray_z -- the defect #218 fixes -- so main is not the oracle.
 
 What is compared, and what deliberately is not:
+- Each capsule's cart clearance must lie inside the reference's own bound. lex-robot samples the segment
+  (`capsule_box_clearance`, BOX_SAMPLES points) and subtracts half a spacing, so its answer d_ref satisfies
+  d_ref <= exact <= d_ref + length / (2 * BOX_SAMPLES). Ours is exact, so it must land in that interval. The
+  reference runs at BOX_SAMPLES = 256 here, which narrows the interval to about a quarter of a millimetre.
 - The collision verdict (collision.tower / collision.tray / collision.other / clear) must match on every pose,
-  counting only the hits the moving arm takes part in (lex-robot#218: an idle arm is not judged).
-- The tray is a BOX over the tray's footprint here (docs/design.md section 6), where lex-robot's model checks a
-  horizontal plane at tray_z. A pose whose capsule is below tray_z but OUTSIDE the footprint is clear here and a
-  hit there; those poses are reported as the known, deliberate difference, and must be the ONLY differences.
+  with and without the cart, counting only the hits the moving arm takes part in (lex-robot#218: an idle arm is
+  not judged). The only verdicts allowed to differ are the ones the reference's bound leaves open: a cart
+  clearance within that interval of the margin, or a cart hit within it of another hit (the worst-first order
+  can flip). Those are counted and reported.
 - The joint-limit, workspace, ik.jump, speed and deadman rules have no Python counterpart to compare against in
   lex-robot's collision model; the recorded poses and the two regressions (#217's jump, #218's frame mix-up) are
   the cancho tests' fixtures instead (tests/safety_test.cho).
@@ -20,6 +25,7 @@ Usage:  python3 tests/differential_safety.py build/safety_driver [--cases N] [--
 `--collision-py` defaults to a sibling checkout of lex-robot (sidecar/); pass it explicitly in CI.
 """
 import argparse
+import math
 import random
 import struct
 import subprocess
@@ -43,6 +49,13 @@ RECORDED = [
 # The rule numbers of src/safety.cho (rule_* functions); the words are lex-robot's Collision `b` field.
 OURS = {0: "clear", 4: "collision.tower", 5: "collision.tray", 6: "collision.other"}
 
+# The reference's sampling of a capsule against the cart's box (collision.BOX_SAMPLES; 16 in lex-robot itself).
+REFERENCE_SAMPLES = 256
+
+# Float noise allowed on top of the reference's bound: the two sides compute the same geometry in a different
+# order of operations.
+EPS = 1e-9
+
 
 def bits(x):
     return struct.unpack("<q", struct.pack("<d", float(x)))[0]
@@ -65,31 +78,68 @@ def without_meshes(urdf, into):
 
 def load_reference(collision_dir, tmp):
     sys.path.insert(0, str(collision_dir))
-    from collision import RobotCollisionModel  # lex-robot's sidecar
-    return RobotCollisionModel.from_json(str(collision_dir / "robot_geometry.json"),
-                                         without_meshes(URDF, tmp))
+    import collision  # lex-robot's sidecar
+    if not hasattr(collision, "capsule_box_clearance"):
+        raise SystemExit("this lex-robot has no cart box (capsule_box_clearance): the oracle is lex-robot#218, "
+                         "branch fix/workspace-frames, not main")
+    collision.BOX_SAMPLES = REFERENCE_SAMPLES
+    model = collision.RobotCollisionModel.from_json(str(collision_dir / "robot_geometry.json"),
+                                                    without_meshes(URDF, tmp))
+    if model.tray_size is None:
+        raise SystemExit("robot_geometry.json has no tray_size_m: the reference would check a plane")
+    return collision, model
 
 
-def reference_verdict(model, side, q, other=None):
-    """lex-robot's verdict for the arm at `q` (and the other arm at `other`, when given): the rule word, or
-    clear. The reference judges both arms when both are given, but only the moving arm's hits count on our
-    side (lex-robot#218), so its hits are filtered to the ones naming this arm."""
+def slack(c):
+    """The width of the reference's bound for capsule `c`: half a sample spacing."""
+    return math.dist(c.a, c.b) / (2 * REFERENCE_SAMPLES)
+
+
+def reference_verdict(collision, model, side, q, other, with_tray):
+    """lex-robot's verdict for the arm at `q` (and the other arm at `other`, when given), and whether the
+    reference's sampling bound leaves it open. The reference judges both arms when both are given, but only the
+    moving arm's hits count on our side (lex-robot#218), so its hits are filtered to the ones naming this arm."""
     if other is None:
         hits = model.check(**{f"{side}_joints_deg": q})
     else:
         other_side = "right" if side == "left" else "left"
         hits = model.check(**{f"{side}_joints_deg": q, f"{other_side}_joints_deg": other})
-    # The moving arm's hits only (lex-robot#218), and -- for the exact comparison -- without the tray: the
-    # reference's tray is a plane, ours is a box, so the tray is compared only as the counted difference.
-    hits = [h for h in hits if (h.a.startswith(side) or h.b.startswith(side)) and h.b != "cart tray"]
+    hits = [h for h in hits if (h.a.startswith(side) or h.b.startswith(side))]
+    if not with_tray:
+        hits = [h for h in hits if h.b != "cart tray"]
+    # Open: a cart clearance the bound cannot place on either side of the margin, or a cart hit the bound cannot
+    # order against the worst other hit.
+    open_ = False
+    if with_tray:
+        caps = {c.name: c for c in model.arm_capsules(side, q)}
+        for i, c in enumerate(model.arm_capsules(side, q)):
+            if i < collision.MOUNTED_LINKS:
+                continue
+            d = model._cart_clearance(c)
+            if model.margin - slack(c) - EPS <= d < model.margin + EPS:
+                open_ = True
+        if len(hits) >= 2:
+            tray = [h for h in hits if h.b == "cart tray"]
+            rest = [h for h in hits if h.b != "cart tray"]
+            if tray and rest and abs(tray[0].clearance - rest[0].clearance) <= slack(caps[tray[0].a]) + EPS:
+                open_ = True
     if not hits:
-        return "clear"
+        return "clear", open_
     worst = hits[0]
     if worst.b == "tower":
-        return "collision.tower"
+        return "collision.tower", open_
     if worst.b == "cart tray":
-        return "collision.tray"
-    return "collision.other"
+        return "collision.tray", open_
+    return "collision.other", open_
+
+
+def mount_row(q, other):
+    row = [str(bits(x)) for x in q]
+    if other is None:
+        row += [str(bits(x)) for x in [0.0] * 5] + ["-"]
+    else:
+        row += [str(bits(x)) for x in other] + ["+"]
+    return row
 
 
 def main():
@@ -105,7 +155,7 @@ def main():
         return 1
     rng = random.Random(args.seed)
     tmp = tempfile.mkdtemp()
-    model = load_reference(args.collision_py, tmp)
+    collision, model = load_reference(args.collision_py, tmp)
 
     # The cases: the recorded poses, and random poses across and beyond each joint's travel, for both arms,
     # with the other arm parked at zero (clear) or at a recorded pose.
@@ -121,46 +171,62 @@ def main():
         other = None if rng.random() < 0.3 else [rng.uniform(-120.0, 120.0) for _ in range(5)]
         cases.append((sides[rng.randrange(2)], q, other))
 
-    # Each case is asked twice: with the tray (both models' full verdicts, the tray difference counted) and
-    # without it (tower and other-arm verdicts, which must match exactly).
+    # Each case is asked three times: the verdict with the cart, the verdict without it, and each capsule's
+    # cart clearance.
     lines = []
     for side, q, other in cases:
         tag = "l" if side == "left" else "r"
         for tray in ("t", "n"):
-            row = [tag] + [str(bits(x)) for x in q]
-            if other is None:
-                row += [str(bits(x)) for x in [0.0] * 5] + ["-"]
-            else:
-                row += [str(bits(x)) for x in other] + ["+"]
-            row.append(tray)
-            lines.append("check " + " ".join(row))
+            lines.append("check " + " ".join([tag] + mount_row(q, other) + [tray]))
+        lines.append("tray " + " ".join([tag] + [str(bits(x)) for x in q]))
     out = subprocess.run([args.driver], input="\n".join(lines) + "\n", capture_output=True, text=True, check=True)
     rows = out.stdout.splitlines()
 
-    # The tray is a box here and a plane in the reference (docs/design.md section 6): the two models are meant
-    # to disagree wherever a capsule is near the tray's side rather than its top. So the gate compares
-    # tower/other/clear exactly, and treats "ours says tray, the rest agree" as the counted, known difference.
     mismatch = []
-    known = 0
-    if len(rows) != 2 * len(cases):
-        mismatch.append(("count", len(rows), 2 * len(cases)))
+    clearance = []
+    open_cases = 0
+    tray_hits = 0
+    worst_gap = 0.0
+    if len(rows) != 3 * len(cases):
+        mismatch.append(("count", len(rows), 3 * len(cases)))
+        rows += ["-1"] * (3 * len(cases) - len(rows))
     for n, (side, q, other) in enumerate(cases):
-        # The with-tray answer and the without-tray answer arrive as consecutive lines.
-        rule_t = int(rows[2 * n].split()[0])
-        rule_n = int(rows[2 * n + 1].split()[0])
+        rule_t = int(rows[3 * n].split()[0])
+        rule_n = int(rows[3 * n + 1].split()[0])
         ours_t = OURS.get(rule_t, f"rule{rule_t}")
         ours_n = OURS.get(rule_n, f"rule{rule_n}")
-        ref = reference_verdict(model, side, q, other)
-        # Without the tray, tower and other-arm verdicts must match the reference exactly.
-        if ours_n != ref:
-            mismatch.append((side, q, ours_n, ref))
-        # With the tray, the box and the plane disagree by design; every difference is counted and reported.
-        if ours_t != ref and ours_n == ref:
-            known += 1
-    print(f"safety: {len(cases)} poses; {known} tray-box differences (the design's, reported), "
-          f"{len(mismatch)} mismatches on tower and other-arm verdicts")
-    if mismatch:
-        print("FAILURES, first 5:", mismatch[:5])
+        ref_n, _ = reference_verdict(collision, model, side, q, other, False)
+        ref_t, open_t = reference_verdict(collision, model, side, q, other, True)
+        # Without the cart, tower and other-arm verdicts must match exactly.
+        if ours_n != ref_n:
+            mismatch.append(("no cart", side, q, other, ours_n, ref_n))
+        # With the cart, exactly too, unless the reference's own bound leaves the verdict open.
+        if ref_t == "collision.tray":
+            tray_hits += 1
+        if ours_t != ref_t:
+            if open_t:
+                open_cases += 1
+            else:
+                mismatch.append(("cart", side, q, other, ours_t, ref_t))
+        # Each capsule's cart clearance, inside the reference's bound.
+        ours = [unbits(x) for x in rows[3 * n + 2].split()]
+        caps = model.arm_capsules(side, q)
+        if len(ours) != len(caps):
+            clearance.append(("capsules", side, q, len(ours), len(caps)))
+            continue
+        for i, c in enumerate(caps):
+            d_ref = model._cart_clearance(c)
+            hi = d_ref + slack(c)
+            if not (d_ref - EPS <= ours[i] <= hi + EPS):
+                clearance.append((side, q, i, ours[i], d_ref, hi))
+            worst_gap = max(worst_gap, ours[i] - d_ref)
+
+    print(f"safety: {len(cases)} poses ({tray_hits} refused for the cart by the reference); "
+          f"{len(mismatch)} verdict mismatches, {open_cases} verdicts the reference's bound leaves open; "
+          f"{len(clearance)} capsule clearances outside the reference's bound "
+          f"(ours sits at most {worst_gap * 1000:.4f} mm above its lower end)")
+    if mismatch or clearance:
+        print("FAILURES, first 5:", (mismatch + clearance)[:5])
         return 1
     print("differential: OK")
     return 0

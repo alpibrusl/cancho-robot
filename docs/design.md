@@ -209,28 +209,6 @@ and lower memory. **Not the claim:** speed. A loss is written up here, in place,
 | R1 | #4, #5 | `serial` module from the spike; codec; read both buses | C1, C2, C6, A1-A3 |
 | R2 | #6, #7 | calibration; kinematics | C3, C4 |
 | R3 | #8 | the safety core, on data only | C5 |
-
-R2's kinematics half is done (branches `kin/forward` and `ik/dls`): forward kinematics from the generated
-chain, held to placo to [1e-15] over sampled poses; inverse kinematics as damped least squares -- the
-method this design left open, now chosen: position-only (a 5-DOF arm cannot generally reach an arbitrary
-orientation), linearised at the LIVE state every iteration (the stale-state defect, lex-robot#217), the
-damping adaptive (a floor of [0.001] and lambda at [5%] of the current error, so the tail converges -- a
-fixed lambda measured settling 0.2 mm short near a joint limit), and the answer refused, not returned, when
-it leaves the measured spans or jumps further than the gripper's travel justifies (the safety core's own
-bounds, checked inside the solve so a caller cannot take a refusing answer to the bus). Gate C4's IK half
-holds the single descent step to the Jacobian's own DLS prediction to [1e-9 rad] over sampled live states
-(placo's FK is the reference chain; placo's own single solve() near a singularity takes barely-descent
-steps of its soft-task weighting, so its step policy is not the oracle -- its kinematics are), and
-converged solves put the gripper at the target to [0.1 mm] or refuse honestly.
-
-R3 is done (branch `safety/core`): `src/safety.cho` checks every motion through one `approve` -- joint limits
-from the calibration spans, the workspace bound in the arm's own frame with `ArmPoint`/`RobotPoint` as distinct
-types, the ik.jump bound, the capsule model (tower, tray as a box over the tray's footprint -- not the plane
-lex-robot checks, the difference counted in the differential -- and the other arm, only the hits the moving arm
-takes part in), a speed clamp that reports itself, and a deadman that holds the pose. Gate C5 holds it to
-lex-robot's `collision.py` on recorded and random poses (tower and other-arm verdicts match exactly; the tray
-differences are the design's own box-vs-plane choice, counted and reported), and `tests/mutate_safety.py` kills
-twelve mutants of the checks.
 | R4 | #9 | actuation through the core, **first motion** | hardware gates |
 | R5 | #10, #11, #12 | teleoperation; the Python boundary; the agent contract | key-to-stop latency; LeRobot records through the boundary |
 | R6 | #13 | measurements | section 9 |
