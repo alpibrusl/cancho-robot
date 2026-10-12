@@ -265,9 +265,22 @@ fn toward(from: float, to: float, step: float) -> [] float {
     return to;
 }
 
-// Move `side` to `target` (six values), every 20 ms one step through core.commit. Stops on a refusal, on a bus
-// error, or on a stall (the goal reached and held for a second, and a joint still more than 3 units away: an
-// obstruction), in which case the present pose becomes the goal, so the arm stops pushing.
+fn clamp_lead(value: float, present: float, most: float) -> [] float {
+    if value > present + most {
+        return present + most;
+    }
+    if value < present - most {
+        return present - most;
+    }
+    return value;
+}
+
+// Move `side` to `target` (six values), every 20 ms one step through core.commit. The HELD pose is what was
+// requested, not the speed-clamped goal the core wrote, so the joints that are not moving stay where they were
+// asked to be (a goal recomputed from the present position lets gravity walk a joint down: lex-robot#215); each
+// request leads the present position by at most the core's lead bound. Stops when every joint is within 3 units of
+// the target, on a refusal, on a bus error, or on a stall: a second without the remaining error shrinking, the
+// arm then held where it stopped, so it does not keep pushing against whatever holds it.
 fn run_move[&f, &i, &d, &h, &t](ffi: &f Ffi("libc"), io: &!i Io, fds: &d [int], side: int, held: &!h [float], target: &t [float]) -> [ffi("libc"), io_write] int {
     let fd = fds[side];
     var result = 0;
@@ -279,50 +292,45 @@ fn run_move[&f, &i, &d, &h, &t](ffi: &f Ffi("libc"), io: &!i Io, fds: &d [int], 
         let joint = alloc_slice[a](1, -1);
         let base = side * robot.joints();
         var cycles = 0;
-        var settled = 0;
+        var best = 1000000.0;
+        var since_better = 0;
         var done = false;
-        while !done && cycles < 500 {
+        while !done && cycles < 1000 {
             if core.read_arm(ffi, fd, side, present) != 0 {
                 say(io, "  bus error: stopped\n");
                 result = core.rule_bus();
                 done = true;
             } else {
-                var reached = true;
-                var j = 0;
-                while j < robot.joints() {
-                    var step = 2.0;
-                    if j == robot.gripper() {
-                        step = 5.0;
-                    }
-                    request[j] = toward(held[base + j], target[j], step);
-                    if request[j] != target[j] {
-                        reached = false;
-                    }
-                    j = j + 1;
-                }
-                var far = false;
+                // The remaining error, and whether it is still shrinking.
+                var error = 0.0;
                 var k = 0;
                 while k < robot.joints() {
                     var d = present[k] - target[k];
                     if d < 0.0 {
                         d = 0.0 - d;
                     }
-                    if d > 3.0 {
-                        far = true;
+                    if d > error {
+                        error = d;
                     }
                     k = k + 1;
                 }
-                if reached && !far {
+                if error < best - 0.2 {
+                    best = error;
+                    since_better = 0;
+                } else {
+                    since_better = since_better + 1;
+                }
+                let n = other_arm(ffi, fds, side, other5);
+                if error <= 3.0 {
                     say(io, "  done\n");
                     done = true;
-                } else if reached && settled >= 50 {
+                } else if since_better >= 50 {
                     say(io, "  stalled: a joint is held back; holding where it is\n");
-                    let n = other_arm(ffi, fds, side, other5);
                     let rule = core.commit(ffi, fd, side, present, present, other5[0..n], 0, 20, goals, joint);
                     if rule == safety.rule_ok() {
                         var c = 0;
                         while c < robot.joints() {
-                            held[base + c] = goals[c];
+                            held[base + c] = present[c];
                             c = c + 1;
                         }
                     } else {
@@ -331,10 +339,17 @@ fn run_move[&f, &i, &d, &h, &t](ffi: &f Ffi("libc"), io: &!i Io, fds: &d [int], 
                     result = -1;
                     done = true;
                 } else {
-                    if reached {
-                        settled = settled + 1;
+                    var j = 0;
+                    while j < robot.joints() {
+                        var step = 2.0;
+                        var most = core.lead_deg();
+                        if j == robot.gripper() {
+                            step = 5.0;
+                            most = core.lead_percent();
+                        }
+                        request[j] = clamp_lead(toward(held[base + j], target[j], step), present[j], most);
+                        j = j + 1;
                     }
-                    let n = other_arm(ffi, fds, side, other5);
                     let rule = core.commit(ffi, fd, side, request, present, other5[0..n], 0, 20, goals, joint);
                     if rule != safety.rule_ok() {
                         refusal(io, rule, joint[0]);
@@ -343,7 +358,7 @@ fn run_move[&f, &i, &d, &h, &t](ffi: &f Ffi("libc"), io: &!i Io, fds: &d [int], 
                     } else {
                         var c = 0;
                         while c < robot.joints() {
-                            held[base + c] = goals[c];
+                            held[base + c] = request[c];
                             c = c + 1;
                         }
                         serial.sleep_us(ffi, 20000);
