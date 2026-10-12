@@ -120,7 +120,7 @@ def main():
                             ["--crossed"], workdir)
     gate("G6/crossed: each arm recognised by its servos",
          "/left: the right arm" in out and "/right: the left arm" in out, [l for l in out.splitlines() if l.startswith("bus")])
-    done = out.count("  done")
+    done = out.count("  done,")
     gate("motions complete on the simulated bus", done >= 6, f"{done} of 7 moves done")
     reads = last_reads(rows)
     worst = 0.0

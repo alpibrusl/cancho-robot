@@ -278,8 +278,9 @@ fn clamp_lead(value: float, present: float, most: float) -> [] float {
 // Move `side` to `target` (six values), every 20 ms one step through core.commit. The HELD pose is what was
 // requested, not the speed-clamped goal the core wrote, so the joints that are not moving stay where they were
 // asked to be (a goal recomputed from the present position lets gravity walk a joint down: lex-robot#215); each
-// request leads the present position by at most the core's lead bound. Stops when every joint is within 3 units of
-// the target, on a refusal, on a bus error, or on a stall: a second without the remaining error shrinking, the
+// request leads the present position by at most the core's lead bound. Stops when every request has reached its target
+// and the arm is within a degree of it, or within 3 and no longer getting closer (the remaining error is printed);
+// on a refusal, on a bus error, or on a stall: a second without the remaining error shrinking, the
 // arm then held where it stopped, so it does not keep pushing against whatever holds it.
 fn run_move[&f, &i, &d, &h, &t](ffi: &f Ffi("libc"), io: &!i Io, fds: &d [int], side: int, held: &!h [float], target: &t [float]) -> [ffi("libc"), io_write] int {
     let fd = fds[side];
@@ -321,8 +322,20 @@ fn run_move[&f, &i, &d, &h, &t](ffi: &f Ffi("libc"), io: &!i Io, fds: &d [int], 
                     since_better = since_better + 1;
                 }
                 let n = other_arm(ffi, fds, side, other5);
-                if error <= 3.0 {
-                    say(io, "  done\n");
+                // Arrived: every request at its target, and the arm either within a degree of it or no longer
+                // getting closer (a servo under load settles a little short; how short is reported, not hidden).
+                var asked = true;
+                var r = 0;
+                while r < robot.joints() {
+                    if held[base + r] != target[r] {
+                        asked = false;
+                    }
+                    r = r + 1;
+                }
+                if asked && (error <= 1.0 || error <= 3.0 && since_better >= 25) {
+                    say(io, "  done, ");
+                    print_fixed(io, error);
+                    say(io, " from the target\n");
                     done = true;
                 } else if since_better >= 50 {
                     say(io, "  stalled: a joint is held back; holding where it is\n");
