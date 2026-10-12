@@ -91,23 +91,26 @@ def main():
         if not ok:
             failures.append(name)
 
-    # G1, G2, G4: torque on, then a request the safety core refuses on its first step (lowering the left arm's
-    # shoulder from rest, towards the tower the estimated geometry says it touches), then a joint past its span.
-    out, rows = run_session(play, ["torque l on", "move l lift -20", "check l lift -20", "move l pan 200"], [], workdir)
+    # G1, G2, G4: a move with torque off (refused: nothing holds a goal), torque on, then requests the safety core
+    # refuses on their FIRST step: the left shoulder lowered further past its span from rest (limit.joint), the
+    # right elbow extended from rest, which takes the gripper further outside the workspace (limit.workspace).
+    out, rows = run_session(play, ["move l pan 10", "torque l on", "move l lift -20", "torque r on", "move r elbow -30"],
+                            [], workdir)
     gate("G6/plain: both arms recognised", "the left arm" in out and "the right arm" in out, out.splitlines()[0:2])
     refusals = out.count("refused:")
     goals = list(sync_writes(rows, GOAL))
     torques = list(sync_writes(rows, TORQUE))
-    gate("G1 a refusal sends nothing", refusals >= 2 and len(goals) == 1 and len(torques) == 1,
+    gate("G1 a refusal sends nothing", refusals == 3 and len(goals) == 2 and len(torques) == 2,
          f"{refusals} refusals, {len(goals)} goal writes, {len(torques)} torque writes")
-    if goals and torques:
+    if goals and len(goals) == len(torques):
         reads = last_reads(rows)
-        g_row, g = goals[0]
-        ok = g_row["t"] < torques[0][0]["t"]
-        for ident, tick in g.items():
-            before = [x for x in reads.get((g_row["bus"], ident), []) if x[0] <= g_row["t"]]
-            ok = ok and bool(before) and magnitude(tick) == before[-1][1]
-        gate("G2 torque on holds the present position, goal before torque", ok, f"goals {g}")
+        ok = True
+        for (g_row, g), (t_row, _) in zip(goals, torques):
+            ok = ok and g_row["bus"] == t_row["bus"] and g_row["t"] < t_row["t"]
+            for ident, tick in g.items():
+                before = [x for x in reads.get((g_row["bus"], ident), []) if x[0] <= g_row["t"]]
+                ok = ok and bool(before) and magnitude(tick) == before[-1][1]
+        gate("G2 torque on holds the present position, goal before torque", ok, f"{len(goals)} arms")
     gate("G4 torque never dropped implicitly", all(v == 1 for _, t in torques for v in t.values()))
 
     # G3, G4, G6: a crossed robot, both arms moved through several joints.
@@ -139,8 +142,11 @@ def main():
     gate("G3 every goal leads the last reading by at most the lead bound", not bad, f"worst {worst:.1f} deg; {bad[:3]}")
     gate("G4 torque never dropped implicitly", all(v == 1 for _, t in sync_writes(rows, TORQUE) for v in t.values()))
 
-    # G5: an obstacle on the right arm's elbow (its chain is on the bus named 'right' when not crossed).
-    out, rows = run_session(play, ["torque r on", "move r elbow -30"], ["--obstacle", "right:3:2850"], workdir)
+    # G5: an obstacle on the right arm's elbow (its chain is on the bus named 'right' when not crossed), at about
+    # 84 degrees: the shoulder is raised first (out of the workspace corner the rest pose sits in), then the elbow is
+    # asked to 76 degrees and meets the obstacle on the way.
+    out, rows = run_session(play, ["torque r on", "move r lift 30", "move r elbow -20"], ["--obstacle", "right:3:2900"],
+                            workdir)
     stalled = "stalled" in out
     goals = list(sync_writes(rows, GOAL))
     reads = last_reads(rows)
