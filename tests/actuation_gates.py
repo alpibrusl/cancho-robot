@@ -157,6 +157,8 @@ def main():
         ok = ok and bool(present) and abs(magnitude(g[3]) - present[-1][1]) <= 3
     gate("G5 a stall is detected and the goal comes back to where the joint stopped", ok,
          [l for l in out.splitlines() if "stalled" in l or "done" in l or "refused" in l])
+    if not ok:
+        print("  the session:\n    " + "\n    ".join(out.splitlines()))
 
     if failures:
         print(f"actuation: {len(failures)} gate(s) failed: {failures}")
