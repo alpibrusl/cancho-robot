@@ -501,6 +501,57 @@ fn clearance_of[&c, &o](caps: &c [Capsule], i: int, other: &o [Capsule], j: int)
     }
 }
 
+// How much a clearance may shrink between two readings of a still pose before it counts as getting closer.
+pub fn clearance_slack_m() -> [] float {
+    return 0.0005;
+}
+
+fn pair_ok(after: float, before: float) -> [] bool {
+    if after >= margin() {
+        return true;
+    }
+    return before < margin() && after >= before - clearance_slack_m();
+}
+
+// Recovery from a pose that already violates a clearance (the arms rest where the estimated geometry says they
+// touch: design section 12). `caps` is the requested pose, `from` the current one, both of the same arm, and
+// `other` the other arm's capsules (or none). True when every pair the request violates was violated as much or
+// more by the current pose: the request may stay or move away, never closer, and never into a NEW violation of any
+// object. Pairs are the ones collision_rule judges: tower, cart (past the mounted links), the other arm.
+pub fn no_violation_worse[&c, &f, &o](caps: &c [Capsule], from: &f [Capsule], other: &o [Capsule], with_tray: bool) -> [] bool {
+    let tw = tower();
+    borrow tw as &w in {
+        var i = 0;
+        while i < len(caps) {
+            let c = caps[i];
+            let d = from[i];
+            borrow c as &cc in {
+                borrow d as &dd in {
+                    if i > 0 && !pair_ok(capsule_clearance(cc, w), capsule_clearance(dd, w)) {
+                        return false;
+                    }
+                    if with_tray && i >= mounted_links() && !pair_ok(tray_clearance(cc), tray_clearance(dd)) {
+                        return false;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+    }
+    var j = 1;
+    while j < len(caps) {
+        var k = 1;
+        while k < len(other) {
+            if !pair_ok(clearance_of(caps, j, other, k), clearance_of(from, j, other, k)) {
+                return false;
+            }
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    return true;
+}
+
 pub fn collision_rule[&c, &o](caps: &c [Capsule], other: &o [Capsule], with_tray: bool) -> [] int {
     // The worst hit first, as lex-robot sorts its list: the rule a refusal names is the one with the least
     // clearance, so a pose that hits two objects is refused for the one that matters.
@@ -668,10 +719,17 @@ pub fn approve[&r, &c, &l, &m, &g, &s, &j, &o](request: &r [float], current: &c 
         if arm_capsules(request, mount, caps) != 0 {
             return rule_collision_tower();
         }
+        // A request that violates a clearance is refused -- unless the arm is already there and the request moves
+        // it no closer to anything (no_violation_worse), which is how an arm leaves a rest pose the estimated
+        // geometry calls a contact.
+        let from = alloc_slice[a](so101.transforms(), Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+        if arm_capsules(current, mount, from) != 0 {
+            return rule_collision_tower();
+        }
         if len(other) == 0 {
             let none = alloc_slice[a](0, Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
             let rule = collision_rule(caps, none, true);
-            if rule != rule_ok() {
+            if rule != rule_ok() && !no_violation_worse(caps, from, none, true) {
                 return rule;
             }
         } else {
@@ -683,7 +741,7 @@ pub fn approve[&r, &c, &l, &m, &g, &s, &j, &o](request: &r [float], current: &c 
                 }
             }
             let rule = collision_rule(caps, oc, true);
-            if rule != rule_ok() {
+            if rule != rule_ok() && !no_violation_worse(caps, from, oc, true) {
                 return rule;
             }
         }

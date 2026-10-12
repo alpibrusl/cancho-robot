@@ -93,6 +93,43 @@ fn test_a_joint_resting_past_its_span_may_stay_or_come_back_never_go_further() -
     return 0;
 }
 
+fn far_capsule() -> [] safety.Capsule {
+    return safety.Capsule { ax: 1.0, ay: 1.0, az: 2.0, bx: 1.0, by: 1.0, bz: 2.0, radius: 0.01 };
+}
+
+fn near_tower(x: float) -> [] safety.Capsule {
+    // A short vertical link beside the tower (axis at x -0.178, radius 0.06), outside the tray's footprint.
+    return safety.Capsule { ax: x, ay: 0.0, az: 0.90, bx: x, by: 0.0, bz: 0.95, radius: 0.02 };
+}
+
+fn test_a_pose_already_touching_may_move_away_but_not_closer_nor_into_something_else() -> [] int {
+    // The estimated geometry puts the left arm at rest inside the tower's margin (2026-10-12). From such a pose a
+    // request may move away from what it touches; one that moves closer is refused, and so is one that moves away
+    // from the tower into the tray (each pair is judged on its own, not the worst of all).
+    region a {
+        let from = alloc_slice[a](6, far_capsule());
+        let req = alloc_slice[a](6, far_capsule());
+        let none = alloc_slice[a](0, far_capsule());
+        from[3] = near_tower(-0.10); // clearance 0.078 - 0.06 - 0.02 = -0.002: inside the 0.01 margin
+        req[3] = near_tower(-0.09); // further away: 0.008, still inside the margin but better
+        test.assert(safety.no_violation_worse(req, from, none, true));
+        req[3] = near_tower(-0.10); // where it is
+        test.assert(safety.no_violation_worse(req, from, none, true));
+        req[3] = near_tower(-0.11); // closer
+        test.assert(!safety.no_violation_worse(req, from, none, true));
+        req[3] = safety.Capsule { ax: 0.0, ay: 0.0, az: 0.70, bx: 0.05, by: 0.0, bz: 0.70, radius: 0.01 }; // into the cart
+        test.assert(!safety.no_violation_worse(req, from, none, true));
+        from[3] = far_capsule(); // from clear: any violation is new
+        req[3] = near_tower(-0.09);
+        test.assert(!safety.no_violation_worse(req, from, none, true));
+        // From just outside the margin to just inside it: a new violation, refused, however small the step.
+        from[3] = near_tower(-0.0878); // 0.0102
+        req[3] = near_tower(-0.0881); // 0.0099
+        test.assert(!safety.no_violation_worse(req, from, none, true));
+    }
+    return 0;
+}
+
 fn test_a_gripper_outside_the_workspace_is_refused_with_limit_workspace() -> [] int {
     region a {
         let req = alloc_slice[a](5, 0.0);
@@ -396,6 +433,31 @@ fn test_the_only_conversion_between_frames_takes_the_mount() -> [] int {
                 test.assert(close(t.x, -0.1, 0.0000000001));
                 test.assert(close(t.y, 0.2, 0.0000000001));
             }
+        }
+    }
+    return 0;
+}
+
+fn test_approve_refuses_a_collision_reached_from_a_clear_pose() -> [] int {
+    // The recovery is for a pose that ALREADY violates. Near the left arm's rest pose, folded (lift -51) the
+    // estimated geometry puts the arm inside the tower's margin, and raised (lift -46) it is clear: from the
+    // raised pose, lowering into the folded one is refused; from the folded one, staying is not.
+    region a {
+        let req = alloc_slice[a](5, 0.0);
+        let cur = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let goals = alloc_slice[a](5, 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        let other = alloc_slice[a](0, 0.0);
+        limits(lim);
+        request(-10.2, -46.0, 95.0, -75.0, -117.0, cur, goals);
+        request(-10.2, -51.0, 95.0, -75.0, -117.0, req, goals);
+        let m = mount_left();
+        borrow m as &mm in {
+            test.assert_eq(safety.approve(cur, cur, lim, mm, other, 0, 100, goals, scale, joint), safety.rule_ok());
+            test.assert_eq(safety.approve(req, cur, lim, mm, other, 0, 100, goals, scale, joint), safety.rule_collision_tower());
+            test.assert_eq(safety.approve(req, req, lim, mm, other, 0, 100, goals, scale, joint), safety.rule_ok());
         }
     }
     return 0;
