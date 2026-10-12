@@ -1,0 +1,286 @@
+edition 5;
+
+module core;
+
+import feetech;
+import serial;
+import serial_write;
+import calibration;
+import robot;
+import safety;
+
+// `core` -- task #9: the one path from a motion request to the servo bus. Every goal written goes through
+// `commit`, which asks `safety.approve` first and writes nothing on a refusal; the bus trace of
+// tests/differential_actuation.py checks that no byte reaches the bus then. The other writes are torque, and
+// they are explicit calls: opening a bus does not touch torque, closing does not either (an arm under load sags
+// when torque drops; lex-robot#215).
+//
+// Held targets: a goal is held, not recomputed from where the servo is, so gravity cannot walk a joint down; and
+// the goal may lead the measured position by at most `lead_deg()` per joint (LeRobot's `max_relative_target`,
+// as lex-robot runs it), so pressing against an obstacle is a soft push, not a growing error.
+//
+// Arms are recognised by their servos: `identify` reads each servo's homing offset and range (registers 31, 9,
+// 11, which `lerobot-calibrate` writes) and answers the side whose calibration they match. A bus whose servos
+// match neither calibration is not driven.
+
+// ── rules beyond safety's (safety's are 0..7) ────────────────────────────────────────────────────────────
+
+// The servos on the bus do not carry the calibration this side is converted with.
+pub fn rule_calibration() -> [] int {
+    return 20;
+}
+
+// The arm's torque is off: there is nothing to hold a goal with, so none is sent.
+pub fn rule_torque_off() -> [] int {
+    return 21;
+}
+
+// A read or a write on the bus failed; the motion stops where it is.
+pub fn rule_bus() -> [] int {
+    return 22;
+}
+
+pub fn rule_name(rule: int) -> [] &static [byte] {
+    if rule == rule_calibration() {
+        return "calibration.mismatch";
+    }
+    if rule == rule_torque_off() {
+        return "torque.off";
+    }
+    if rule == rule_bus() {
+        return "bus.error";
+    }
+    return safety.rule_name(rule);
+}
+
+pub fn lead_deg() -> [] float {
+    return 8.0;
+}
+
+pub fn lead_percent() -> [] float {
+    return 10.0;
+}
+
+pub fn timeout_us() -> [] int {
+    return 3000;
+} // per servo answered (design section 5)
+
+// ── reading ──────────────────────────────────────────────────────────────────────────────────────────────
+
+// One register of `count` (1 or 2) bytes from servo `id`, unsigned, or a negative error.
+pub fn read_register[&f](ffi: &f Ffi("libc"), fd: int, id: int, address: int, count: int) -> [ffi("libc")] int {
+    var value = 0;
+    region a {
+        let pkt = alloc_slice[a](16, byte_of(0));
+        let reply = alloc_slice[a](64, byte_of(0));
+        let table = alloc_slice[a](feetech.slots(), 0);
+        let n = feetech.read(pkt, id, address, count);
+        let r = serial.transact(ffi, fd, pkt, n, reply, id, table, timeout_us());
+        if r < 0 {
+            value = r;
+        } else if table[3] != count {
+            value = feetech.error_bad_length();
+        } else if count == 1 {
+            value = int_of(reply[table[2]]);
+        } else {
+            value = feetech.u16(reply, table[2]);
+        }
+    }
+    return value;
+}
+
+fn matches[&f](ffi: &f Ffi("libc"), fd: int, side: int) -> [ffi("libc")] bool {
+    var j = 0;
+    while j < robot.joints() {
+        let id = robot.servo_id(side, j);
+        let homing = read_register(ffi, fd, id, 31, 2);
+        let low = read_register(ffi, fd, id, 9, 2);
+        let high = read_register(ffi, fd, id, 11, 2);
+        if homing < 0 || low < 0 || high < 0 {
+            return false;
+        }
+        if calibration.decode_sign(homing, calibration.sign_bit_homing_offset()) != robot.homing_offset(side, j) {
+            return false;
+        }
+        if low != robot.range_min(side, j) || high != robot.range_max(side, j) {
+            return false;
+        }
+        j = j + 1;
+    }
+    return true;
+}
+
+// Which side's calibration the six arm servos on `fd` carry: robot.left(), robot.right(), or -1.
+pub fn identify[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] int {
+    if matches(ffi, fd, robot.left()) {
+        return robot.left();
+    }
+    if matches(ffi, fd, robot.right()) {
+        return robot.right();
+    }
+    return -1;
+}
+
+// The six joints' raw positions, sign-magnitude decoded, into `ticks`. Answers 0, or rule_bus().
+pub fn read_ticks[&f, &t](ffi: &f Ffi("libc"), fd: int, side: int, ticks: &!t [int]) -> [ffi("libc")] int {
+    var j = 0;
+    while j < robot.joints() {
+        let raw = read_register(ffi, fd, robot.servo_id(side, j), 56, 2);
+        if raw < 0 {
+            return rule_bus();
+        }
+        ticks[j] = calibration.decode_sign(raw, calibration.sign_bit_position());
+        j = j + 1;
+    }
+    return 0;
+}
+
+// Ticks to the units the safety core and the operator use: degrees for joints 0..4, percent for the gripper.
+pub fn to_units[&t, &u](side: int, ticks: &t [int], units: &!u [float]) -> [] int {
+    var j = 0;
+    while j < robot.joints() {
+        let low = robot.range_min(side, j);
+        let high = robot.range_max(side, j);
+        if j == robot.gripper() {
+            units[j] = calibration.percent(ticks[j], low, high, robot.drive_mode(side, j) == 1);
+        } else {
+            units[j] = calibration.degrees(ticks[j], low, high);
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+pub fn read_arm[&f, &u](ffi: &f Ffi("libc"), fd: int, side: int, units: &!u [float]) -> [ffi("libc")] int {
+    var status = 0;
+    region a {
+        let ticks = alloc_slice[a](robot.joints(), 0);
+        status = read_ticks(ffi, fd, side, ticks);
+        if status == 0 {
+            to_units(side, ticks, units);
+        }
+    }
+    return status;
+}
+
+// ── torque ───────────────────────────────────────────────────────────────────────────────────────────────
+
+fn ids_of[&i](side: int, ids: &!i [int]) -> [] int {
+    var j = 0;
+    while j < robot.joints() {
+        ids[j] = robot.servo_id(side, j);
+        j = j + 1;
+    }
+    return 0;
+}
+
+// Torque on, holding where the arm is: the goals are set to the present positions, tick for tick, BEFORE torque is
+// enabled, so the arm does not jump to whatever goal it last had. `held` receives the held pose, in units.
+pub fn hold_and_enable[&f, &h](ffi: &f Ffi("libc"), fd: int, side: int, held: &!h [float]) -> [ffi("libc")] int {
+    var status = 0;
+    region a {
+        let ticks = alloc_slice[a](robot.joints(), 0);
+        let ids = alloc_slice[a](robot.joints(), 0);
+        ids_of(side, ids);
+        status = read_ticks(ffi, fd, side, ticks);
+        if status == 0 {
+            if serial_write.commit_goals(ffi, fd, ids, ticks, robot.joints()) < 0 {
+                status = rule_bus();
+            } else if serial_write.set_torque(ffi, fd, ids, robot.joints(), true) < 0 {
+                status = rule_bus();
+            } else {
+                to_units(side, ticks, held);
+            }
+        }
+    }
+    return status;
+}
+
+// Torque off: an explicit request, and the arm will fall where gravity takes it. The caller says so first.
+pub fn free_arm[&f](ffi: &f Ffi("libc"), fd: int, side: int) -> [ffi("libc")] int {
+    var status = 0;
+    region a {
+        let ids = alloc_slice[a](robot.joints(), 0);
+        ids_of(side, ids);
+        if serial_write.set_torque(ffi, fd, ids, robot.joints(), false) < 0 {
+            status = rule_bus();
+        }
+    }
+    return status;
+}
+
+// ── the one path to a goal ───────────────────────────────────────────────────────────────────────────────
+
+// The measured joint limits of `side`, in degrees, min then max per arm joint, as safety.approve takes them.
+pub fn limits_of[&l](side: int, limits: &!l [float]) -> [] int {
+    var j = 0;
+    while j < robot.gripper() {
+        let low = robot.range_min(side, j);
+        let high = robot.range_max(side, j);
+        limits[j * 2] = calibration.degrees(low, low, high);
+        limits[j * 2 + 1] = calibration.degrees(high, low, high);
+        j = j + 1;
+    }
+    return 0;
+}
+
+pub fn mount_of(side: int) -> [] safety.Mount {
+    var y = 0.133;
+    if side == robot.right() {
+        y = -0.133;
+    }
+    return safety.Mount { x: -0.135, y: y, z: 0.76, yaw_deg: 0.0 };
+}
+
+fn lead(goal: float, present: float, most: float) -> [] float {
+    if goal > present + most {
+        return present + most;
+    }
+    if goal < present - most {
+        return present - most;
+    }
+    return goal;
+}
+
+// Approve `request` (six values: five joint angles in degrees, the gripper in percent) for `side`, from `current`
+// (the arm's present pose, same units), with the other arm at `other` (its five joint angles, or empty), and
+// commit the approved goals. Answers rule_ok() when the goals were written -- `goals` then holds them -- or the
+// rule the request was refused with, in which case NOTHING was sent. `joint` names the refused joint, or -1.
+pub fn commit[&f, &r, &c, &o, &g, &j](ffi: &f Ffi("libc"), fd: int, side: int, request: &r [float], current: &c [float], other: &o [float], since_ms: int, dt_ms: int, goals: &!g [float], joint: &!j [int]) -> [ffi("libc")] int {
+    var rule = safety.rule_ok();
+    region a {
+        let limits = alloc_slice[a](robot.gripper() * 2, 0.0);
+        limits_of(side, limits);
+        let arm = alloc_slice[a](robot.gripper(), 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let m = mount_of(side);
+        borrow m as &mm in {
+            rule = safety.approve(request, current, limits, mm, other, since_ms, dt_ms, arm, scale, joint);
+        }
+        if rule == safety.rule_ok() {
+            let ticks = alloc_slice[a](robot.joints(), 0);
+            let ids = alloc_slice[a](robot.joints(), 0);
+            ids_of(side, ids);
+            var k = 0;
+            while k < robot.gripper() {
+                goals[k] = lead(arm[k], current[k], lead_deg());
+                ticks[k] = calibration.ticks_of_degrees(goals[k], robot.range_min(side, k), robot.range_max(side, k));
+                k = k + 1;
+            }
+            let g = robot.gripper();
+            var grip = request[g];
+            if grip < 0.0 {
+                grip = 0.0;
+            }
+            if grip > 100.0 {
+                grip = 100.0;
+            }
+            goals[g] = lead(grip, current[g], lead_percent());
+            ticks[g] = calibration.ticks_of_percent(goals[g], robot.range_min(side, g), robot.range_max(side, g), robot.drive_mode(side, g) == 1);
+            if serial_write.commit_goals(ffi, fd, ids, ticks, robot.joints()) < 0 {
+                rule = rule_bus();
+            }
+        }
+    }
+    return rule;
+}
