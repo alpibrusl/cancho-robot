@@ -281,7 +281,7 @@ fn test_a_pose_above_the_workspace_ceiling_is_refused() -> [] int {
 
 fn test_a_wrist_far_outside_the_trays_footprint_is_not_a_tray_hit() -> [] int {
     // The tray is a box over the tray's footprint, not a plane: the pan 100, lift 20 pose puts the gripper
-    // at y -0.365 in the arm's frame, outside the tray's 0.35 m width, and no capsule of the pose is driven
+    // at y -0.365 in the arm's frame (-0.232 in the robot's), outside the tray's 0.45 m width, and no capsule of the pose is driven
     // down into the tray from inside the footprint, so the tray rule must stay quiet. A plane at tray_z
     // would answer differently -- that difference is the design's, and this test pins it.
     region a {
@@ -325,6 +325,27 @@ fn test_the_tray_is_a_box_not_a_plane() -> [] int {
                 test.assert(safety.tray_clearance(y) < 0.0);
             }
         }
+    }
+    return 0;
+}
+
+fn test_a_link_passing_outside_the_trays_corner_is_clear() -> [] int {
+    // A horizontal link below the tray's height whose span covers the footprint in both x and y but which passes
+    // outside the corner (0.175, 0.225): its nearest point is (0.2076, 0.2501), 0.0412 m from the corner, so the
+    // clearance is 0.0312 m less nothing. A bound from the segment's bounding box would call it inside the
+    // footprint, 0.06 m under the surface: the refusal of a pose that is clear.
+    let past = safety.Capsule { ax: 0.40, ay: 0.0, az: 0.70, bx: 0.0, by: 0.52, bz: 0.70, radius: 0.01 };
+    borrow past as &p in {
+        let d = safety.tray_clearance(p);
+        test.assert(d > 0.0311554763);
+        test.assert(d < 0.0311554764);
+    }
+    // Inside the footprint and under the surface, the depth to the nearest face counts: 0.06 m to the top.
+    let under = safety.Capsule { ax: 0.0, ay: 0.0, az: 0.70, bx: 0.05, by: 0.0, bz: 0.70, radius: 0.01 };
+    borrow under as &u in {
+        let d = safety.tray_clearance(u);
+        test.assert(d > -0.0700000001);
+        test.assert(d < -0.0699999999);
     }
     return 0;
 }

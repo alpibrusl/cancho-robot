@@ -59,3 +59,78 @@ at 1 Mbaud, with the same reading as the reference. But today that takes foreign
 workarounds (`strdup` for a C string, termios written by hand) and one ABI hack (a variadic `ioctl`
 that otherwise fails *silently*), and the report cannot say which device it reaches. Findings 1, 2,
 4, 5 and 6 go to cancho#387; finding 2 is filed as a compiler bug.
+
+## 2026-10-12 · #8 · The safety core on data, held to lex-robot#218's model
+
+**Asked.** Does `src/safety.cho` decide every motion the way lex-robot's guard does -- one `approve`, joint limits
+from the calibration spans, the workspace bound in the arm's own frame (`ArmPoint` and `RobotPoint` are distinct
+types, so lex-robot#218's frame mix-up does not type-check), the ik.jump bound, capsule collisions (tower, cart,
+other arm, counting only the hits the moving arm takes part in), a speed clamp that reports itself, a deadman that
+holds the pose?
+
+**Setup.** cancho `7bf3628`. The oracle is lex-robot's `sidecar/collision.py` at lex-robot#218
+(`fix/workspace-frames`, commit `7e5436b`), which models the cart as a box from the floor to the tray over the
+tray's footprint. `tests/differential_safety.py`, 1524 poses (recorded and random, both arms, with and without the
+other arm).
+
+**What came out.**
+
+1. **The first version of the gate compared against lex-robot's main, which checks an infinite plane.** Every
+   tray verdict was then a "known difference" and none was checked: 739 of 1524 decisions were unverified.
+2. **With #218 as the oracle the gate found a real defect:** the footprint's axes were swapped (0.45 m along x;
+   lex-robot reads `tray_size_m` as [x, y] = [0.35, 0.45], the arms side by side along the long side). With the
+   swap, 7 of 324 poses were *clear* here and a *tray hit* in the reference: the unsafe direction. Fixed. The
+   order is still lex-robot's assumption, not a measurement (design section 12).
+3. **The cart distance was a bound from the segment's bounding box**, which refuses a link passing outside the
+   tray's corner (a 0.031 m clearance read as 0.06 m under the surface). Replaced by the exact distance: the box's
+   signed distance is convex, so a ternary search along the segment finds its minimum. lex-robot samples the
+   segment and subtracts half a spacing, so the gate holds each capsule's clearance inside that interval (run at
+   256 samples: ours sits at most 0.26 mm above the reference's lower end, as it must).
+4. **Result:** 0 verdict mismatches with the cart and without it, 461 cart refusals agreed, 2 verdicts inside the
+   reference's own sampling band (counted, reported), 0 clearances outside the bound. `tests/mutate_safety.py`:
+   16 of 16 mutants caught, including the swapped axes, the search removed, the depth inside the cart and the
+   link's radius.
+
+**Changes.** Nothing in the design: section 6 already said box, not plane. The geometry is still estimates until
+measured on this robot (section 12); the left arm's rest pose put a link 22 mm into the tray on 2026-10-02, so a
+mount or tray number is off by centimetres.
+
+## 2026-10-12 · #7 · Inverse kinematics: damped least squares from the live state (position only)
+
+**Asked.** Can the IK step lex-robot#217 got wrong -- linearised around a stale pose, so a 1 cm step asked for
+51 degrees -- be written so the stale state cannot happen, and held to placo?
+
+**Setup.** cancho `7bf3628`. `src/ik.cho`, `tests/differential_ik.py` (placo's forward kinematics as the chain),
+`tests/mutate_ik.py`.
+
+**What came out.**
+
+1. **Linearised at the live state every iteration**, damped least squares with an adaptive damping (a floor of
+   0.001, lambda at 5% of the current error: a fixed lambda measured settling 0.2 mm short near a joint limit).
+   An answer that leaves the measured spans or jumps further than the distance justifies is refused, not
+   returned, inside the solve.
+2. **Gate C4, IK half:** the single descent step matches the Jacobian's own DLS prediction to 3.3e-10 rad over
+   800 sampled live states (234 refused, honestly); converged solves put the gripper within 0.1 mm of the target.
+   placo's own `solve()` is not the oracle of the step policy (near a singularity its soft-task weighting takes
+   barely-descent steps); its kinematics are.
+3. **The mutation gate first claimed 6 of 6 and ran none:** two patterns matched the one-line form `cancho fmt`
+   rewrites, so the harness crashed on its own assert and CI was red. The patterns now match the formatted text
+   and an identity mutant is refused. 6 of 6 caught.
+
+**Not done.** The solve is **position only**. Issue #7 asks to hold the gripper's current orientation, which
+lex-robot learned on the real arm (position-only drifted the wrist 13-30 degrees per 10 cm). The SO-101 has five
+joints, so a full 6-D pose is not generally reachable; holding the orientation as a weighted secondary task is
+the open choice (design section 13). #7 stays open for it.
+
+## 2026-10-12 · #12, #15 · The toolbox contract on the controller; decision records
+
+**Asked.** Can an agent ask the controller what a motion would do, and be sure the asking moves nothing?
+
+**What came out.** `check` answers every check the core applies, named by rule tag, the speed clamp reported as a
+clamp, and the goals it would commit, without sending anything. Its authority ceiling is `heap, io_read,
+io_write` and nothing else: `cancho authority` proves it sends nothing, rather than the code promising it.
+`introspect` lists the rules, bounds and authority from the same tables the code runs on (`src/rules.cho`,
+`src/safety.cho`'s own functions), `skill` says how to ask, errors are JSON with stable rule tags.
+`tests/conformance_check.py` holds the three in agreement (every rule a refusal names is listed, every listed rule
+is reachable, the bounds introspect reports are the ones the core runs); `tests/mutate_check.py`: 6 of 6 table
+drifts caught. What v1 leaves out, and why, is in `docs/decisions.md`.

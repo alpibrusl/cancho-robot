@@ -22,7 +22,10 @@ def build_mutants():
     text = (ROOT / K).read_text()
 
     def one(before, after, what):
+        # The text is matched as `cancho fmt` leaves it (CI checks formatting first), and a mutant that changes
+        # nothing is refused: either would make a "caught" count that never ran.
         assert text.count(before) == 1, (what, text.count(before))
+        assert before != after, ("identity mutant", what)
         return (K, before, after, what)
 
     return [
@@ -32,14 +35,14 @@ def build_mutants():
         one("    var i = 0;\n    while i < so101.moving() {\n        solution[i] = current[i];\n        i = i + 1;\n    }",
             "    var i = 0;\n    while i < so101.moving() {\n        solution[i] = 0.0;\n        i = i + 1;\n    }",
             "the solve seeded from zero, not the live state (the stale-state defect)"),
-        one("pub fn damping_min() -> [] float { return 0.001; }",
-            "pub fn damping_min() -> [] float { return 10.0; }",
+        one("pub fn damping_min() -> [] float {\n    return 0.001;\n}",
+            "pub fn damping_min() -> [] float {\n    return 10.0;\n}",
             "the damping floor so high the step never moves"),
         one("        j[c] = (px - pose[3]) / d;",
             "        j[c] = (pose[3] - px) / d;",
             "the Jacobian's sign flipped"),
-        one("pub fn tolerance_m() -> [] float { return 0.000001; }",
-            "pub fn tolerance_m() -> [] float { return 0.05; }",
+        one("pub fn tolerance_m() -> [] float {\n    return 0.000001;\n}",
+            "pub fn tolerance_m() -> [] float {\n    return 0.05;\n}",
             "the convergence tolerance loosened to 5 cm"),
         one("            if solution[j1] < limits[j1 * 2] || solution[j1] > limits[j1 * 2 + 1] {",
             "            if solution[j1] < limits[j1 * 2] - 1000.0 || solution[j1] > limits[j1 * 2 + 1] + 1000.0 {",

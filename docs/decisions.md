@@ -45,18 +45,19 @@ very claim the report makes.
 **Revisit when:** never for the bounds; for inference, only if cancho gains a proven numeric runtime and
 the measurement shows the boundary costs a control loop latency that matters.
 
-## Linux and the Raspberry Pi target are not in v1
+## Both platforms are in v1; which one drives the arms is open
 
-**Decision:** the code is written for both platforms where it costs nothing (the spike ran both), but only
-darwin-aarch64 runs against hardware in v1.
+**Decision:** the code is written for darwin-aarch64 and Linux aarch64 alike. The spike opened the bus at
+1 Mbaud from cancho on both (research log, 2026-10-08): the Mac Studio needs the `IOSSIOSPEED` ioctl
+declared as variadic, the Raspberry Pi 5 (Debian 13, glibc 2.41) takes `tcsetattr` with `B1000000` alone,
+and the Pi ran it on both backends (Cranelift and LLVM). CI already runs on Linux (x86-64, no hardware).
 
-**Reason:** the robot's controller in production is a Mac Studio; the Pi 5 is the training rig. The
-differences that matter are narrow (the spike measured them: darwin needs the `IOSSIOSPEED` ioctl at
-1 Mbaud, Linux takes `tcsetattr` alone) and both are already handled in the spike's code. What is not
-done is a Linux CI target, Linux hardware gates, and the Pi's own timing budget -- each a real cost for a
-machine v1 does not drive. The design doc's section 5 numbers are the Mac's.
+**Open:** which machine is the controller that drives the arms. The Pi is dedicated to the robot (one
+program per bus is easier to keep there); the Mac Studio is where lex-robot runs today. That is the
+maintainer's choice, not this record's; until it is made, every hardware gate is run on both.
 
-**Revisit when:** the controller moves to the Pi in a later phase, with its own hardware gates.
+**Revisit when:** the maintainer picks the controller, or the timing measurement (section 9) shows one of
+the two cannot keep the loop.
 
 ## A real-time guarantee is not in v1
 

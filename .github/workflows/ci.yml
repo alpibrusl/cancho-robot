@@ -154,8 +154,12 @@ jobs:
       - name: Build the safety driver
         working-directory: robot
         run: ../cancho/target/release/cancho build --std tests/safety_driver.cho src/safety.cho src/kinematics.cho src/so101.cho -o build/safety_driver
-      - name: lex-robot, the oracle of the safety differential (MIT; collision.py and robot_geometry.json)
-        run: git clone --depth 1 https://github.com/alpibrusl/lex-robot /tmp/lex-robot
+      # lex-robot#218 (fix/workspace-frames): the cart as a box over the tray's footprint, as the safety core
+      # models it; lex-robot's main still checks an infinite plane. Pinned by commit, moved in a change that says why.
+      - name: lex-robot, the oracle of the safety differential (EUPL-1.2; collision.py and robot_geometry.json)
+        run: |
+          git clone --quiet https://github.com/alpibrusl/lex-robot /tmp/lex-robot
+          git -C /tmp/lex-robot checkout --quiet 7e5436bc4073e42eead1f8f9f6b6613d922ca494
       - name: Safety core against lex-robot's model (gate C5)
         working-directory: robot
         run: python3 tests/differential_safety.py build/safety_driver --cases 1500 --collision-py /tmp/lex-robot/sidecar
