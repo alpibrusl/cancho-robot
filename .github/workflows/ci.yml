@@ -44,7 +44,7 @@ jobs:
 
       - name: Formatting
         working-directory: robot
-        run: ../cancho/target/release/cancho fmt --check src tests
+        run: ../cancho/target/release/cancho fmt --check src tests tools
 
       - name: Codec tests (the spike's packets and replies, each refusal, every string of up to six bytes)
         working-directory: robot
@@ -169,6 +169,12 @@ jobs:
       - name: Safety driver authority is within its ceiling
         working-directory: robot
         run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/safety_driver.ceiling tests/safety_driver.cho src/safety.cho src/kinematics.cho src/so101.cho
+      - name: Build the bus scan (task #5; it runs against the robot only, never here)
+        working-directory: robot
+        run: ../cancho/target/release/cancho build --std tools/scan.cho src/serial.cho src/feetech.cho -o build/scan
+      - name: Scan authority is within its ceiling (libc for the bus, no write builder)
+        working-directory: robot
+        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/scan.ceiling tools/scan.cho src/serial.cho src/feetech.cho
       - name: The toolbox contract tests (the catalogue, the tags the design names)
         working-directory: robot
         run: ../cancho/target/release/cancho test tests/check_test.cho src/check.cho src/rules.cho src/safety.cho src/ik.cho src/kinematics.cho src/so101.cho --std

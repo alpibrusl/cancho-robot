@@ -169,3 +169,32 @@ io_write` and nothing else: `cancho authority` proves it sends nothing, rather t
 `tests/conformance_check.py` holds the three in agreement (every rule a refusal names is listed, every listed rule
 is reachable, the bounds introspect reports are the ones the core runs); `tests/mutate_check.py`: 6 of 6 table
 drifts caught. What v1 leaves out, and why, is in `docs/decisions.md`.
+
+## 2026-10-12 · #5 · Reading the whole robot from cancho, on the Pi (read-only)
+
+**Asked.** Can the controller, on the Raspberry Pi 5, read every servo of both buses with the ticks LeRobot
+reads, how often does a read fail, and how fast is it next to scservo_sdk on the same machine?
+
+**Setup.** cancho `7bf3628`, Cranelift, on the Pi (Debian 13, aarch64). `src/serial.cho` (every foreign call
+of the controller: `open`, `tcsetattr`, `read`, `write`, `clock_gettime` and five more, pinned by
+`authority/scan.ceiling`), `tools/scan.cho` (PING, then timed READs of Present_Position; it imports no write
+builder). `tests/hw/scan_vs_reference.py` alternates it with scservo_sdk 1.0.0 (what LeRobot's FeetechMotorsBus
+drives), 3 rounds of 1000 reads per id, arms still, torque off.
+
+**What came out.**
+
+1. **First, nobody answered**, not even scservo_sdk, at any baud rate, and not one byte came back to a raw
+   broadcast PING, with the servo LEDs on. The cause was **the adapter boards' jumper on the ESP32 side**: in
+   that position USB writes into nothing. Moved to USB, a broadcast PING found exactly the robot: left 1-8 (arm,
+   tower pan and tilt), right 1-6, 9, 10 (arm, wheels). Check the jumper first next time; the LEDs prove power,
+   not the data path.
+2. **All 16 servos, 48,000 reads each side: 0 failures, cancho and scservo_sdk alike**, and the raw ticks equal
+   on every id (tolerance 2 ticks; the difference was 0 everywhere).
+3. **Latency** (per read, microseconds, worst round): cancho p50 267-270, p99 329-335, max 335-346; scservo_sdk
+   p50 278-279, p99 310-338, max 339-463. About 10 us faster at the median; the rest is the wire and the servo
+   (a READ is 8 bytes out and 8 back at 1 Mbaud, 160 us, plus the servo's return delay). Throughput 3,610-3,670
+   reads/s against 3,444-3,467, each including opening the port. **Not a speed claim**: the bus sets the pace,
+   and both are within 4% of each other.
+
+**Changes.** Task #5's gate holds on this robot. The scan is read-only by construction (no `feetech_write`
+import), and its authority is pinned in CI; the hardware comparison is local-only, as section 11 says.

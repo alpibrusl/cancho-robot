@@ -1,0 +1,15 @@
+# tools/scan.cho with the serial module and the read codec: the command line, the console, and libc for the bus
+# and its clock. No feetech_write: nothing here can build a packet that moves a servo.
+args
+ffi("libc")
+io_write
+foreign cfmakeraw
+foreign clock_gettime
+foreign close
+foreign open
+foreign read
+foreign strdup
+foreign tcflush
+foreign tcgetattr
+foreign tcsetattr
+foreign write

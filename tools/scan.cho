@@ -1,0 +1,214 @@
+edition 5;
+
+import std.io;
+import feetech;
+import serial;
+
+// `scan` -- task #5: read the whole robot, read-only. For each id given: a PING, then `reads` READs of
+// Present_Position (address 56, two bytes), each timed. One line per id:
+//
+//     id <id> ping <0|1> reads <n> ok <k> fail <f> flagged <s> last_error <tag> us <min> <p50> <p90> <p99> <max> ticks <first> <last>
+//
+// `flagged` counts replies whose error byte was not zero (a servo reporting overload, voltage, ...: the reply is
+// still read, the flag is counted). Ticks are the raw register, as scservo_sdk returns it (sign and calibration
+// are task #6's). A bus that drops replies also drops commands silently, so the failure count is the point.
+//
+//     scan <device> <reads> <id>...
+//
+// It imports `feetech` and `serial` and not `feetech_write`: it cannot build a packet that moves a servo, and its
+// authority ceiling (authority/scan.ceiling) says which libc symbols it reaches.
+
+fn say[&i, &t](io: &!i Io, text: &t [byte]) -> [io_write] int {
+    return io.write_all(io, text);
+}
+
+fn number[&s](s: &s [byte]) -> [] int {
+    var v = 0;
+    var i = 0;
+    while i < len(s) {
+        let d = int_of(s[i]) - '0';
+        if d < 0 || d > 9 {
+            return -1;
+        }
+        v = v * 10 + d;
+        i = i + 1;
+    }
+    if len(s) == 0 {
+        return -1;
+    }
+    return v;
+}
+
+fn sort[&a](xs: &!a [int], n: int) -> [] int {
+    // Shell sort, gaps halving: a few thousand latencies, no allocation.
+    var gap = n / 2;
+    while gap > 0 {
+        var i = gap;
+        while i < n {
+            let x = xs[i];
+            var j = i;
+            while j >= gap && xs[j - gap] > x {
+                xs[j] = xs[j - gap];
+                j = j - gap;
+            }
+            xs[j] = x;
+            i = i + 1;
+        }
+        gap = gap / 2;
+    }
+    return 0;
+}
+
+fn at_percent[&a](xs: &a [int], n: int, pct: int) -> [] int {
+    if n == 0 {
+        return -1;
+    }
+    var k = n * pct / 100;
+    if k >= n {
+        k = n - 1;
+    }
+    return xs[k];
+}
+
+fn field[&i](io: &!i Io, name: &static [byte], v: int) -> [io_write] int {
+    say(io, " ");
+    say(io, name);
+    say(io, " ");
+    io.print_int(io, v);
+    return 0;
+}
+
+fn scan_id[&f, &i](ffi: &f Ffi("libc"), io: &!i Io, fd: int, id: int, reads: int) -> [ffi("libc"), io_write] int {
+    region a {
+        let pkt = alloc_slice[a](16, byte_of(0));
+        let reply = alloc_slice[a](64, byte_of(0));
+        let table = alloc_slice[a](feetech.slots(), 0);
+        let lat = alloc_slice[a](reads + 1, 0);
+        let n = feetech.ping(pkt, id);
+        var ping = 0;
+        if serial.transact(ffi, fd, pkt, n, reply, id, table, 20000) > 0 {
+            ping = 1;
+        }
+        var ok = 0;
+        var fail = 0;
+        var flagged = 0;
+        var last_error = 0;
+        var first = -1;
+        var last = -1;
+        let m = feetech.read(pkt, id, 56, 2);
+        var k = 0;
+        while k < reads {
+            let t0 = serial.now_us(ffi);
+            let r = serial.transact(ffi, fd, pkt, m, reply, id, table, 20000);
+            let t1 = serial.now_us(ffi);
+            if r > 0 && table[3] == 2 {
+                lat[ok] = t1 - t0;
+                ok = ok + 1;
+                if table[1] != 0 {
+                    flagged = flagged + 1;
+                }
+                last = feetech.u16(reply, table[2]);
+                if first < 0 {
+                    first = last;
+                }
+            } else {
+                fail = fail + 1;
+                last_error = r;
+            }
+            k = k + 1;
+        }
+        sort(lat, ok);
+        say(io, "id ");
+        io.print_int(io, id);
+        field(io, "ping", ping);
+        field(io, "reads", reads);
+        field(io, "ok", ok);
+        field(io, "fail", fail);
+        field(io, "flagged", flagged);
+        say(io, " last_error ");
+        if last_error == 0 {
+            say(io, "none");
+        } else {
+            say(io, serial.error_tag(last_error));
+        }
+        field(io, "us", at_percent(lat, ok, 0));
+        say(io, " ");
+        io.print_int(io, at_percent(lat, ok, 50));
+        say(io, " ");
+        io.print_int(io, at_percent(lat, ok, 90));
+        say(io, " ");
+        io.print_int(io, at_percent(lat, ok, 99));
+        say(io, " ");
+        io.print_int(io, at_percent(lat, ok, 100));
+        field(io, "ticks", first);
+        say(io, " ");
+        io.print_int(io, last);
+        say(io, "\n");
+    }
+    return 0;
+}
+
+fn run[&f, &i, &g](ffi: &f Ffi("libc"), io: &!i Io, args: &g Args) -> [ffi("libc"), io_write, args] int {
+    if arg_count(args) < 4 {
+        say(io, "usage: scan <device> <reads> <id>...\n");
+        return 2;
+    }
+    let reads = number(arg(args, 2));
+    if reads < 1 {
+        say(io, "scan: <reads> must be a positive number\n");
+        return 2;
+    }
+    var status = 0;
+    region a {
+        // The device path, NUL-terminated for `open`.
+        let given = arg(args, 1);
+        let path = alloc_slice[a](len(given) + 1, byte_of(0));
+        var c = 0;
+        while c < len(given) {
+            path[c] = given[c];
+            c = c + 1;
+        }
+        let fd = serial.open_bus(ffi, path);
+        if fd < 0 {
+            say(io, "scan: ");
+            say(io, serial.error_tag(fd));
+            say(io, "\n");
+            status = 3;
+        } else {
+            var k = 3;
+            while k < arg_count(args) {
+                let id = number(arg(args, k));
+                if id < 0 || id > feetech.max_id() {
+                    say(io, "scan: not an id\n");
+                    status = 2;
+                } else {
+                    scan_id(ffi, io, fd, id, reads);
+                }
+                k = k + 1;
+            }
+            serial.close_bus(ffi, fd);
+        }
+    }
+    return status;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
+    release(net);
+    release(clock);
+    release(fs);
+    release(heap);
+    let libc = narrow(ffi, "libc");
+    var status = 0;
+    borrow libc as &f in {
+        borrow args as &g in {
+            borrow mut io as &!i in {
+                status = run(f, i, g);
+            }
+        }
+    }
+    release(libc);
+    release(args);
+    release(io);
+    return status;
+}
