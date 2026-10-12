@@ -232,7 +232,7 @@ pub fn mount_of(side: int) -> [] safety.Mount {
     return safety.Mount { x: -0.135, y: y, z: 0.76, yaw_deg: 0.0 };
 }
 
-fn lead(goal: float, present: float, most: float) -> [] float {
+pub fn lead(goal: float, present: float, most: float) -> [] float {
     if goal > present + most {
         return present + most;
     }

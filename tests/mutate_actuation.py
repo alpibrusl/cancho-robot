@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Task #9's gates can fail: each deliberately wrong actuation below must be caught by tests/actuation_gates.py
-(the simulated bus's trace) or refused by the compiler.
+"""Task #9's gates can fail: each deliberately wrong actuation below must be caught by tests/core_test.cho, by
+tests/actuation_gates.py (the simulated bus's trace), or refused by the compiler.
 
 Usage:  python3 tests/mutate_actuation.py path/to/cancho
 """
@@ -48,6 +48,10 @@ def caught(cancho, tree):
     b = subprocess.run([cancho, "build", "--std", *SOURCES, "-o", "build/play"], cwd=tree, capture_output=True, text=True)
     if b.returncode:
         return "does not build"
+    t = subprocess.run([cancho, "test", "tests/core_test.cho", *SOURCES[1:], "--std"], cwd=tree, capture_output=True,
+                       text=True)
+    if t.returncode:
+        return "core tests"
     r = subprocess.run([sys.executable, "tests/actuation_gates.py", "build/play"], cwd=tree, capture_output=True,
                        text=True, timeout=900)
     if r.returncode:
