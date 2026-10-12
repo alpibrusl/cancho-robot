@@ -198,3 +198,43 @@ drives), 3 rounds of 1000 reads per id, arms still, torque off.
 
 **Changes.** Task #5's gate holds on this robot. The scan is read-only by construction (no `feetech_write`
 import), and its authority is pinned in CI; the hardware comparison is local-only, as section 11 says.
+
+## 2026-10-12 · #9 · Actuation through the core, on a simulated bus first
+
+**Asked.** Can every goal reach the servos only through `safety.approve`, with a refusal sending no byte, torque
+never dropped implicitly, the goal held and never more than 8 degrees ahead, and a stall stopped -- shown from the
+bus's side, before the first motion on the robot?
+
+**Setup.** cancho `7bf3628`, on the Pi. `src/core.cho` (the one path: `commit` = approve, then one SYNC WRITE),
+`src/serial_write.cho` (goal and torque packets; no foreign call), `src/robot.cho` (generated from LeRobot's
+calibration files), `tools/play.cho` (the console). `sim/fake_bus.py`: one pty per bus answering the Feetech
+protocol from register files, with the robot's calibration in its servos and its rest positions, logging every
+packet. The controller opens it as it opens `/dev/ttyACM0`. `tests/actuation_gates.py` judges six claims from that
+trace; `tests/mutate_actuation.py` breaks each.
+
+**What came out.**
+
+1. **The calibration files and the buses did not match.** Read-only, the servos' own registers (homing offset 31,
+   limits 9 and 11) on the adapter `5B61033220` are exactly `xle_right.json`'s, and on `5B3D043715` `xle_left.json`'s,
+   the opposite of lex-robot's `bus_preflight.py`; the tower (7, 8) and wheel (9, 10) servos moved too. Something
+   was re-cabled since lex-robot wrote that. So the controller recognises an arm by its servos (`core.identify`),
+   and a bus whose servos match neither calibration is not driven. lex-robot opens arms by adapter serial; worth
+   checking there.
+2. **At rest, every arm is past a bound.** Joints folded past the swept spans (left lift -91.2 vs -90.5, elbow,
+   wrist), the right gripper 2.4 mm outside the workspace, and the left arm inside the tower's margin by the
+   estimated geometry until its shoulder rises to -46 degrees. Judging only the request refused every motion
+   from rest. The rules now judge from where the arm is: stay or move back, never further, and per collision pair,
+   so leaving the tower into the cart is still refused (design section 6). 24/24 safety mutants.
+3. **The console first held the speed-clamped goal**, which drifted the joints that were not moving toward their
+   present positions (the gravity walk of lex-robot#215, reintroduced). It now holds what was requested, and a
+   stall is a second without progress rather than "the goal reached but not the target", which never fired.
+4. **Gates, on the simulated bus:** G1 a refusal sends nothing (3 refusals, 0 extra writes); G2 torque on writes
+   goal = present tick for tick before enabling; G3 every goal within the lead bound of the last reading; G4 no
+   implicit torque off; G5 a stall is detected and the goal comes back to where the joint stopped; G6 arms
+   recognised with the chains crossed. 7 of 7 actuation mutants caught (one only by a unit test: the console's
+   2-degree steps never exercise the core's 8-degree lead bound, a careless client would). Gate A3, the write path
+   by call site, with its self-test.
+
+**Not yet.** Nothing has moved on the robot. The hardware gate of #9 (one joint first, small steps, the operator
+at the e-stop, tracking against LeRobot driving the same sequence) is next, and the geometry of design section 12
+is still estimates: the tower contact at rest says so.
