@@ -59,3 +59,38 @@ at 1 Mbaud, with the same reading as the reference. But today that takes foreign
 workarounds (`strdup` for a C string, termios written by hand) and one ABI hack (a variadic `ioctl`
 that otherwise fails *silently*), and the report cannot say which device it reaches. Findings 1, 2,
 4, 5 and 6 go to cancho#387; finding 2 is filed as a compiler bug.
+
+## 2026-10-12 · #8 · The safety core on data, held to lex-robot#218's model
+
+**Asked.** Does `src/safety.cho` decide every motion the way lex-robot's guard does -- one `approve`, joint limits
+from the calibration spans, the workspace bound in the arm's own frame (`ArmPoint` and `RobotPoint` are distinct
+types, so lex-robot#218's frame mix-up does not type-check), the ik.jump bound, capsule collisions (tower, cart,
+other arm, counting only the hits the moving arm takes part in), a speed clamp that reports itself, a deadman that
+holds the pose?
+
+**Setup.** cancho `7bf3628`. The oracle is lex-robot's `sidecar/collision.py` at lex-robot#218
+(`fix/workspace-frames`, commit `7e5436b`), which models the cart as a box from the floor to the tray over the
+tray's footprint. `tests/differential_safety.py`, 1524 poses (recorded and random, both arms, with and without the
+other arm).
+
+**What came out.**
+
+1. **The first version of the gate compared against lex-robot's main, which checks an infinite plane.** Every
+   tray verdict was then a "known difference" and none was checked: 739 of 1524 decisions were unverified.
+2. **With #218 as the oracle the gate found a real defect:** the footprint's axes were swapped (0.45 m along x;
+   lex-robot reads `tray_size_m` as [x, y] = [0.35, 0.45], the arms side by side along the long side). With the
+   swap, 7 of 324 poses were *clear* here and a *tray hit* in the reference: the unsafe direction. Fixed. The
+   order is still lex-robot's assumption, not a measurement (design section 12).
+3. **The cart distance was a bound from the segment's bounding box**, which refuses a link passing outside the
+   tray's corner (a 0.031 m clearance read as 0.06 m under the surface). Replaced by the exact distance: the box's
+   signed distance is convex, so a ternary search along the segment finds its minimum. lex-robot samples the
+   segment and subtracts half a spacing, so the gate holds each capsule's clearance inside that interval (run at
+   256 samples: ours sits at most 0.26 mm above the reference's lower end, as it must).
+4. **Result:** 0 verdict mismatches with the cart and without it, 461 cart refusals agreed, 2 verdicts inside the
+   reference's own sampling band (counted, reported), 0 clearances outside the bound. `tests/mutate_safety.py`:
+   16 of 16 mutants caught, including the swapped axes, the search removed, the depth inside the cart and the
+   link's radius.
+
+**Changes.** Nothing in the design: section 6 already said box, not plane. The geometry is still estimates until
+measured on this robot (section 12); the left arm's rest pose put a link 22 mm into the tray on 2026-10-02, so a
+mount or tray number is off by centimetres.

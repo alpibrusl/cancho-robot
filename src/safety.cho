@@ -175,18 +175,21 @@ pub fn tower() -> [] Capsule {
     return Capsule { ax: -0.178, ay: 0.0, az: 0.73, bx: -0.178, by: 0.0, bz: 1.168, radius: 0.06 };
 }
 
-// The cart's tray: a box over the tray's footprint (0.35 x 0.45 m), not an infinite plane. `tray_z` is its surface.
+// The cart: a box from the floor up to the tray over the tray's footprint, not an infinite plane. `tray_z` is its
+// surface. The footprint is robot_geometry.json's `tray_size_m` read as [x, y] = [0.35, 0.45], as lex-robot#218
+// reads it: the two arms sit side by side along the long side. That order is lex-robot's assumption, not a
+// measurement (design section 12).
 pub fn tray_z() -> [] float {
     return 0.76;
 }
 
 pub fn tray_half_x() -> [] float {
-    return 0.225;
-} // 0.45 m along x, the tray's long side is fore-aft
+    return 0.175;
+} // 0.35 m along x, fore-aft
 
 pub fn tray_half_y() -> [] float {
-    return 0.175;
-} // 0.35 m along y
+    return 0.225;
+} // 0.45 m along y, the side the arms share
 
 // The margin: a pair counts as colliding below this clearance, so near-misses are refused too.
 pub fn margin() -> [] float {
@@ -306,63 +309,83 @@ pub fn capsule_clearance[&a, &b](c1: &a Capsule, c2: &b Capsule) -> [] float {
     return d - c1.radius - c2.radius;
 }
 
-// The gap between a capsule and the tray's box: the distance the capsule's segment keeps from the box's volume,
-// less the capsule's radius. Negative means through the tray's surface. The box is a solid over the tray's
-// footprint, from the floor to `tray_z`: a capsule outside the footprint but at the tray's height does not hit it
-// (the design's refusal of the infinite plane), and a capsule inside the footprint below tray_z does.
+// The signed distance from a point to the cart's box [(-hx, hx) x (-hy, hy) x (0, tray_z)]: the Euclidean
+// distance when outside, minus the depth to the nearest face when inside. It is convex (the box is), which is
+// what lets `tray_clearance` minimise it along a segment by ternary search.
+pub fn box_signed_distance(px: float, py: float, pz: float) -> [] float {
+    let half_z = tray_z() / 2.0;
+    var qx = px - tray_half_x();
+    if px < 0.0 {
+        qx = -px - tray_half_x();
+    }
+    var qy = py - tray_half_y();
+    if py < 0.0 {
+        qy = -py - tray_half_y();
+    }
+    var qz = pz - half_z - half_z;
+    if pz < half_z {
+        qz = half_z - pz - half_z;
+    }
+    var ox = 0.0;
+    if qx > 0.0 {
+        ox = qx;
+    }
+    var oy = 0.0;
+    if qy > 0.0 {
+        oy = qy;
+    }
+    var oz = 0.0;
+    if qz > 0.0 {
+        oz = qz;
+    }
+    var inner = qx;
+    if qy > inner {
+        inner = qy;
+    }
+    if qz > inner {
+        inner = qz;
+    }
+    if inner > 0.0 {
+        inner = 0.0;
+    }
+    return sqrt(ox * ox + oy * oy + oz * oz) + inner;
+}
+
+// The gap between a capsule and the cart's box: the least signed distance along the capsule's segment, less its
+// radius. Negative means into the tray, or under it into the cart. A capsule outside the footprint but below the
+// tray's height does not hit it (the design's refusal of the infinite plane). Exact, not a bound: the signed
+// distance is convex along the segment, so a ternary search over the segment's parameter converges on the
+// minimum ((2/3)^100 of the segment, far below a float's resolution of it).
 pub fn tray_clearance[&a](c: &a Capsule) -> [] float {
-    // The distance from the segment to the box, as the distance to the box's interior if the projection is
-    // inside, else the distance to the nearest face, edge or corner (the segment's endpoints and the segment's
-    // span over each axis decide).
-    let hx = tray_half_x();
-    let hy = tray_half_y();
-    let top = tray_z();
-    // The closest approach of the segment to the box over each axis: the segment's span, clamped.
-    var lox = c.ax;
-    var hix = c.bx;
-    if lox > hix {
-        lox = c.bx;
-        hix = c.ax;
+    let dx = c.bx - c.ax;
+    let dy = c.by - c.ay;
+    let dz = c.bz - c.az;
+    var lo = 0.0;
+    var hi = 1.0;
+    var k = 0;
+    while k < 100 {
+        let t1 = lo + (hi - lo) / 3.0;
+        let t2 = hi - (hi - lo) / 3.0;
+        let f1 = box_signed_distance(c.ax + dx * t1, c.ay + dy * t1, c.az + dz * t1);
+        let f2 = box_signed_distance(c.ax + dx * t2, c.ay + dy * t2, c.az + dz * t2);
+        if f1 <= f2 {
+            hi = t2;
+        } else {
+            lo = t1;
+        }
+        k = k + 1;
     }
-    var loy = c.ay;
-    var hiy = c.by;
-    if loy > hiy {
-        loy = c.by;
-        hiy = c.ay;
+    let t = (lo + hi) / 2.0;
+    var best = box_signed_distance(c.ax + dx * t, c.ay + dy * t, c.az + dz * t);
+    let at_a = box_signed_distance(c.ax, c.ay, c.az);
+    if at_a < best {
+        best = at_a;
     }
-    var loz = c.az;
-    var hiz = c.bz;
-    if loz > hiz {
-        loz = c.bz;
-        hiz = c.az;
+    let at_b = box_signed_distance(c.bx, c.by, c.bz);
+    if at_b < best {
+        best = at_b;
     }
-    // The gap over each axis to the box [(-hx, hx) x (-hy, hy) x (bottom, top)], positive outside.
-    var gx = 0.0;
-    if lox >= hx {
-        gx = lox - hx;
-    } else if hix <= -hx {
-        gx = -hx - hix;
-    }
-    var gy = 0.0;
-    if loy >= hy {
-        gy = loy - hy;
-    } else if hiy <= -hy {
-        gy = -hy - hiy;
-    }
-    var gz = 0.0;
-    if loz >= top {
-        gz = loz - top;
-    } else if hiz <= top {
-        // Wholly below the tray's surface: the vertical gap, negative as far as the segment is under it.
-        gz = loz - top;
-    }
-    // Inside the footprint: the vertical gap decides (negative below the surface, positive above it).
-    if gx == 0.0 && gy == 0.0 {
-        return gz - c.radius;
-    }
-    // Outside the footprint: the horizontal distance to the box's side.
-    let h = sqrt(gx * gx + gy * gy);
-    return h - c.radius;
+    return best - c.radius;
 }
 
 // ── the arm's capsules ───────────────────────────────────────────────────────────────────────────────────
