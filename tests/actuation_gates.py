@@ -93,9 +93,9 @@ def main():
             failures.append(name)
 
     # G1, G2, G4: a move with torque off (refused: nothing holds a goal), torque on, then requests the safety core
-    # refuses on their FIRST step: the left shoulder lowered further past its span from rest (limit.joint), the
-    # right elbow extended from rest, which takes the gripper further outside the workspace (limit.workspace).
-    out, rows = run_session(play, ["move l pan 10", "torque l on", "move l lift -20", "torque r on", "move r elbow -30"],
+    # refuses on their FIRST step: each arm's shoulder lowered further past its span from rest (limit.joint; both
+    # rest a degree or so below the floor calibration swept).
+    out, rows = run_session(play, ["move l pan 10", "torque l on", "move l lift -20", "torque r on", "move r lift -20"],
                             [], workdir)
     gate("G6/plain: both arms recognised", "the left arm" in out and "the right arm" in out, out.splitlines()[0:2])
     refusals = out.count("refused:")
