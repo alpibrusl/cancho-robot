@@ -1,0 +1,14 @@
+edition 5;
+fn serve[&n](net: &n Net("8920")) -> [net_in("8920")] int {
+    match tcp_listen(net, 8920, 4, 0) {
+        Listening::Ok(l) => { listener_close(l); return 0; }
+        Listening::Failed(e) => { return 2; }
+    }
+}
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
+    release(io); release(ffi); release(fs); release(heap); release(args); release(clock);
+    let bound = narrow(net, "8920"); var s = 1;
+    borrow bound as &n in { s = serve(n); }
+    release(bound); return s;
+}

@@ -1,0 +1,155 @@
+edition 7;
+
+import std.io;
+import calibration;
+
+// A test driver for `tests/differential_calibration.py`: `calibration` behind a pipe. One command per line, integers
+// in decimal, a float given and answered as its 64 bits read as an integer (`bits_of` / `float_of_bits`, edition 7),
+// so the comparison with LeRobot is exact rather than through a decimal rendering:
+//
+//     deg <ticks> <min> <max>                 tdeg <value bits> <min> <max>
+//     pct <ticks> <min> <max> <drive 0|1>     tpct <value bits> <min> <max> <drive 0|1>
+//     spct <ticks> <min> <max> <drive 0|1>    tspct <value bits> <min> <max> <drive 0|1>
+//     dsign <raw> <bit>                       esign <value> <bit>
+//
+// Answers one integer per line. Standard input and output, nothing else.
+
+fn token[&l, &s](line: &l [byte], k: int, span: &!s [int]) -> [] bool {
+    var i = 0;
+    var seen = -1;
+    let n = len(line);
+    while i < n {
+        while i < n && int_of(line[i]) == ' ' {
+            i = i + 1;
+        }
+        if i >= n {
+            return false;
+        }
+        let start = i;
+        while i < n && int_of(line[i]) != ' ' {
+            i = i + 1;
+        }
+        seen = seen + 1;
+        if seen == k {
+            span[0] = start;
+            span[1] = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+// A decimal integer, possibly negative, the full 64-bit range (float bits need it).
+fn number[&l, &s](line: &l [byte], k: int, span: &!s [int]) -> [] int {
+    if !token(line, k, span) {
+        return 0;
+    }
+    var i = span[0];
+    var negative = false;
+    if int_of(line[i]) == '-' {
+        negative = true;
+        i = i + 1;
+    }
+    // Accumulate negatively, so -9223372036854775808 fits.
+    var v = 0;
+    while i < span[1] {
+        v = v * 10 - (int_of(line[i]) - '0');
+        i = i + 1;
+    }
+    if negative {
+        return v;
+    }
+    return -v;
+}
+
+fn is[&l, &w](line: &l [byte], s0: int, s1: int, word: &w [byte]) -> [] bool {
+    if s1 - s0 != len(word) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if int_of(line[s0 + i]) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn answer[&i, &l](io: &!i Io, line: &l [byte]) -> [io_write] int {
+    region a {
+        let span = alloc_slice[a](2, 0);
+        if !token(line, 0, span) {
+            return 0;
+        }
+        let s0 = span[0];
+        let s1 = span[1];
+        let x = number(line, 1, span);
+        let min = number(line, 2, span);
+        let max = number(line, 3, span);
+        let drive = number(line, 4, span) == 1;
+        var out = 0;
+        if is(line, s0, s1, "deg") {
+            out = bits_of(calibration.degrees(x, min, max));
+        } else if is(line, s0, s1, "tdeg") {
+            out = calibration.ticks_of_degrees(float_of_bits(x), min, max);
+        } else if is(line, s0, s1, "pct") {
+            out = bits_of(calibration.percent(x, min, max, drive));
+        } else if is(line, s0, s1, "tpct") {
+            out = calibration.ticks_of_percent(float_of_bits(x), min, max, drive);
+        } else if is(line, s0, s1, "spct") {
+            out = bits_of(calibration.signed_percent(x, min, max, drive));
+        } else if is(line, s0, s1, "tspct") {
+            out = calibration.ticks_of_signed_percent(float_of_bits(x), min, max, drive);
+        } else if is(line, s0, s1, "dsign") {
+            out = calibration.decode_sign(x, min);
+        } else if is(line, s0, s1, "esign") {
+            out = calibration.encode_sign(x, min);
+        }
+        io.print_int(io, out);
+        io.newline(io);
+    }
+    return 0;
+}
+
+fn run[&i](io: &!i Io) -> [io_read, io_write] int {
+    var more = true;
+    while more {
+        region a {
+            let line = alloc_slice[a](256, byte_of(0));
+            var n = 0;
+            var c = getchar(io);
+            while c >= 0 && c != '\n' {
+                if n < len(line) {
+                    line[n] = byte_of(c);
+                    n = n + 1;
+                }
+                c = getchar(io);
+            }
+            if c < 0 && n == 0 {
+                more = false;
+            } else {
+                answer(io, line[0..n]);
+            }
+        }
+    }
+    return 0;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec } = split(world);
+    release(net);
+    release(clock);
+    release(ffi);
+    release(fs);
+    release(heap);
+    release(args);
+    release(signals);
+    release(exec);
+    var status = 0;
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    release(io);
+    return status;
+}

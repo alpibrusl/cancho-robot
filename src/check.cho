@@ -1,0 +1,457 @@
+edition 5;
+module check;
+
+// `check` -- what a motion would do, without sending anything (task #12): the safety core and the solver
+// run on a proposed request and the answer names every check -- which pass, which refuse, with which rule
+// tag, what the speed clamp did, and what the goals would be. Nothing touches a bus: the authority ceiling
+// names standard input and output only, and that is the proof, not a promise.
+//
+// Input, one JSON object per line:
+//
+//     {"op":"check","side":"l","current":[5 angles],"request":[5 angles]}
+//     {"op":"check","side":"l","current":[5 angles],"target":[x,y,z]}        solved, then checked
+//     {"op":"introspect"}
+//     {"op":"skill"}
+//
+// `current` is the LIVE state (the last read); `request` is the goal proposed, in degrees, LeRobot's;
+// `target` is a Cartesian point in the arm's own frame, metres, which the solver answers first and the
+// safety core then judges like any other request. Output is the toolbox envelope (cancho-tools' contract):
+// `{"ok":true,"command":"check","schema":"check.v1","data":{...}}` or the same with `ok:false` and an
+// `error` whose `rule` is the refusing check's tag. The rule names come from the same catalogue the code
+// reads (src/rules.cho), so what `introspect` lists is what a refusal names.
+
+import std.buffer;
+import std.io;
+import std.json;
+import safety;
+import ik;
+import so101;
+import rules;
+
+pub fn version() -> [] &static [byte] {
+    return "0.1.0";
+}
+
+pub fn schema() -> [] &static [byte] {
+    return "check.v1";
+}
+
+// The envelope's error object: code, rule, message, hint, repair (none), detail.
+fn error_object[&h](heap: &!h Heap, rule_index: int, joint: int) -> [heap] json.Writer {
+    var w = json.writer(heap, 256);
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "code");
+    if rules.exit_of(rule_index) == 2 {
+        w = json.put_string(heap, w, "INVALID_ARGS");
+    } else {
+        w = json.put_string(heap, w, "PRECONDITION_FAILED");
+    }
+    w = json.put_key(heap, w, "rule");
+    w = json.put_string(heap, w, rules.tag_of(rule_index));
+    w = json.put_key(heap, w, "message");
+    w = json.put_string(heap, w, rules.summary_of(rule_index));
+    w = json.put_key(heap, w, "hint");
+    w = json.put_string(heap, w, "the rule names the check that refused; introspect lists every rule");
+    w = json.put_key(heap, w, "repair");
+    w = json.put_null(heap, w);
+    w = json.put_key(heap, w, "detail");
+    w = json.begin_object(heap, w);
+    if joint >= 0 {
+        w = json.put_key(heap, w, "joint");
+        w = json.put_int(heap, w, joint);
+    }
+    w = json.end_object(heap, w);
+    w = json.end_object(heap, w);
+    return w;
+}
+
+// The data object: the checks, in the order the core applies them, and the goals it would commit.
+fn data_object[&h, &c, &q, &l, &m, &o, &g](heap: &!h Heap, current: &c [float], request: &q [float], limits: &l [float], mount: &m safety.Mount, other: &o [float], goals: &g [float]) -> [heap] json.Writer {
+    var w = json.writer(heap, 256);
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "checks");
+    w = json.begin_array(heap, w);
+    // limit.joint
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "rule");
+    w = json.put_string(heap, w, "limit.joint");
+    w = json.put_key(heap, w, "outcome");
+    if safety.within_joint_limits(request, limits) {
+        w = json.put_string(heap, w, "pass");
+    } else {
+        w = json.put_string(heap, w, "refuse");
+    }
+    w = json.end_object(heap, w);
+    // limit.workspace
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "rule");
+    w = json.put_string(heap, w, "limit.workspace");
+    w = json.put_key(heap, w, "outcome");
+    if safety.within_workspace(request) {
+        w = json.put_string(heap, w, "pass");
+    } else {
+        w = json.put_string(heap, w, "refuse");
+    }
+    w = json.end_object(heap, w);
+    // ik.jump
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "rule");
+    w = json.put_string(heap, w, "ik.jump");
+    w = json.put_key(heap, w, "outcome");
+    if safety.within_jump(current, request) {
+        w = json.put_string(heap, w, "pass");
+    } else {
+        w = json.put_string(heap, w, "refuse");
+    }
+    w = json.end_object(heap, w);
+    // collision.*: the requested pose's capsules, against the tower, the tray and the other arm
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "rule");
+    w = json.put_string(heap, w, "collision");
+    w = json.put_key(heap, w, "outcome");
+    region a {
+        let caps = alloc_slice[a](so101.transforms(), safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+        let oc = alloc_slice[a](so101.transforms(), safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+        var other_mount = safety.other_mount_of(mount);
+        region a2 {
+            if safety.arm_capsules(request, mount, caps) != 0 {
+                w = json.put_string(heap, w, "refuse");
+            } else {
+                var rule = safety.rule_ok();
+                if len(other) >= so101.moving() {
+                    borrow other_mount as &om in {
+                        if safety.arm_capsules(other, om, oc) == 0 {
+                            rule = safety.collision_rule(caps, oc, true);
+                        }
+                    }
+                } else {
+                    rule = safety.collision_rule(caps, oc, true);
+                }
+                if rule == safety.rule_ok() {
+                    w = json.put_string(heap, w, "pass");
+                } else {
+                    w = json.put_string(heap, w, "refuse");
+                }
+            }
+        }
+    }
+    w = json.end_object(heap, w);
+    // limit.speed: a clamp, reported as a clamp
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "rule");
+    w = json.put_string(heap, w, "limit.speed");
+    w = json.put_key(heap, w, "outcome");
+    if safety.speed_scale(current, request, 100) < 1.0 {
+        w = json.put_string(heap, w, "clamp");
+    } else {
+        w = json.put_string(heap, w, "pass");
+    }
+    w = json.end_object(heap, w);
+    w = json.end_array(heap, w);
+    // the goals the core would commit (already clamped by approve's caller contract)
+    w = json.put_key(heap, w, "goals");
+    w = json.begin_array(heap, w);
+    var k = 0;
+    while k < so101.moving() {
+        w = json.put_float(heap, w, goals[k]);
+        k = k + 1;
+    }
+    w = json.end_array(heap, w);
+    w = json.end_object(heap, w);
+    return w;
+}
+
+// The whole envelope as one JSON document in a buffer.
+fn envelope[&h](heap: &!h Heap, ok: bool, body: json.Writer) -> [heap] buffer.Buffer {
+    var w = json.writer(heap, 64);
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "ok");
+    w = json.put_bool(heap, w, ok);
+    w = json.put_key(heap, w, "command");
+    w = json.put_string(heap, w, "check");
+    w = json.put_key(heap, w, "schema");
+    w = json.put_string(heap, w, schema());
+    if ok {
+        w = json.put_key(heap, w, "data");
+    } else {
+        w = json.put_key(heap, w, "error");
+    }
+    let finished = json.finish(body);
+    region z {
+        borrow finished as &fb in {
+            w = json.put_fragment(heap, w, buffer.bytes(fb));
+        }
+    }
+    buffer.drop(heap, finished);
+    w = json.put_key(heap, w, "meta");
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "version");
+    w = json.put_string(heap, w, version());
+    w = json.end_object(heap, w);
+    w = json.end_object(heap, w);
+    return json.finish(w);
+}
+
+// The side of a parsed line: true is left, and the mount and the calibration spans follow it.
+fn is_left[&s, &t](src: &s [byte], tape: &t [int]) -> [] bool {
+    let side = json.get(src, tape, 0, "side");
+    if side >= 0 && json.is_string(tape, side) {
+        return !json.string_equals(src, tape, side, "r");
+    }
+    return true;
+}
+
+// The measured spans of the side's calibration file, in the degrees calibration.degrees reports.
+pub fn limits_of[&l](left: bool, l: &!l [float]) -> [] int {
+    if left {
+        l[0] = -113.2;
+        l[1] = 113.2;
+        l[2] = -90.5;
+        l[3] = 90.5;
+        l[4] = -95.4;
+        l[5] = 95.4;
+        l[6] = -75.3;
+        l[7] = 75.3;
+        l[8] = -180.0;
+        l[9] = 180.0;
+    } else {
+        l[0] = -100.8;
+        l[1] = 100.8;
+        l[2] = -102.1;
+        l[3] = 102.1;
+        l[4] = -97.4;
+        l[5] = 97.4;
+        l[6] = -101.5;
+        l[7] = 101.5;
+        l[8] = -140.6;
+        l[9] = 140.6;
+    }
+    return 0;
+}
+
+// Reads `current` (5 angles) and `request` or `target` from the parsed line. Answers 0 for a check with
+// `request`, 1 with `target`, 2 for introspect, 3 for skill, -1 for a malformed line, -2 for an unknown op.
+fn parse_line[&s, &t, &c, &r, &g](src: &s [byte], tape: &t [int], current: &!c [float], request: &!r [float], target: &!g [float]) -> [] int {
+    let op = json.get(src, tape, 0, "op");
+    if op < 0 {
+        return -1;
+    }
+    if json.string_equals(src, tape, op, "introspect") {
+        return 2;
+    }
+    if json.string_equals(src, tape, op, "skill") {
+        return 3;
+    }
+    if !json.string_equals(src, tape, op, "check") {
+        return -2;
+    }
+    let cur = json.get(src, tape, 0, "current");
+    if !json.is_array(tape, cur) || json.count(tape, cur) < so101.moving() {
+        return -1;
+    }
+    var k = 0;
+    while k < so101.moving() {
+        let at = json.at(tape, cur, k);
+        if !json.is_number(tape, at) {
+            return -1;
+        }
+        current[k] = json.to_float(src, tape, at);
+        k = k + 1;
+    }
+    let req = json.get(src, tape, 0, "request");
+    if req >= 0 && json.is_array(tape, req) && json.count(tape, req) >= so101.moving() {
+        k = 0;
+        while k < so101.moving() {
+            let at = json.at(tape, req, k);
+            if !json.is_number(tape, at) {
+                return -1;
+            }
+            request[k] = json.to_float(src, tape, at);
+            k = k + 1;
+        }
+        return 0;
+    }
+    let tgt = json.get(src, tape, 0, "target");
+    if tgt >= 0 && json.is_array(tape, tgt) && json.count(tape, tgt) >= 3 {
+        k = 0;
+        while k < 3 {
+            let at = json.at(tape, tgt, k);
+            if !json.is_number(tape, at) {
+                return -1;
+            }
+            target[k] = json.to_float(src, tape, at);
+            k = k + 1;
+        }
+        return 1;
+    }
+    return -1;
+}
+
+// Answers one line: the envelope as a buffer, and the exit code the caller should take.
+pub fn answer[&h, &s](heap: &!h Heap, line: &s [byte]) -> [heap] (buffer.Buffer, int) {
+    region a {
+        let tape = alloc_slice[a](512, 0);
+        let current = alloc_slice[a](5, 0.0);
+        let request = alloc_slice[a](5, 0.0);
+        let target = alloc_slice[a](3, 0.0);
+        let parsed = json.parse(line, tape);
+        if parsed < 0 {
+            let e = error_object(heap, 11, -1); // args.malformed
+            return (envelope(heap, false, e), rules.exit_of(11));
+        }
+        let op = parse_line(line, tape, current, request, target);
+        if op == 2 {
+            return (introspect(heap), 0);
+        }
+        if op == 3 {
+            return (skill(heap), 0);
+        }
+        if op == -2 {
+            let e = error_object(heap, 10, -1); // args.unknown-command
+            return (envelope(heap, false, e), rules.exit_of(10));
+        }
+        if op < 0 {
+            let e = error_object(heap, 11, -1);
+            return (envelope(heap, false, e), rules.exit_of(11));
+        }
+        let left = is_left(line, tape);
+        // A Cartesian target is solved first; the solution is the request the core judges.
+        if op == 1 {
+            let lim = alloc_slice[a](10, 0.0);
+            limits_of(left, lim);
+            let solution = alloc_slice[a](5, 0.0);
+            let error_m = alloc_slice[a](1, 0.0);
+            let iterations = alloc_slice[a](1, 0);
+            let status = ik.solve(current, target, solution, lim, error_m, iterations);
+            if status != ik.status_ok() {
+                let e = error_object(heap, rules.index_of_ik(status), -1);
+                return (envelope(heap, false, e), rules.exit_of(rules.index_of_ik(status)));
+            }
+            var k = 0;
+            while k < so101.moving() {
+                request[k] = solution[k];
+                k = k + 1;
+            }
+        }
+        // The core's own verdict, then the same answer the controller would give.
+        let lim = alloc_slice[a](10, 0.0);
+        limits_of(left, lim);
+        let goals = alloc_slice[a](5, 0.0);
+        let scale = alloc_slice[a](1, 0.0);
+        let joint = alloc_slice[a](1, 0);
+        let other = alloc_slice[a](0, 0.0);
+        var y = 0.133;
+        if !left {
+            y = -0.133;
+        }
+        let mount = safety.Mount { x: -0.135, y: y, z: 0.76, yaw_deg: 0.0 };
+        borrow mount as &m in {
+            let rule = safety.approve(request, current, lim, m, other, 0, 100, goals, scale, joint);
+            if rule != safety.rule_ok() {
+                let idx = rules.index_of_safety(rule);
+                let e = error_object(heap, idx, joint[0]);
+                return (envelope(heap, false, e), rules.exit_of(idx));
+            }
+            let d = data_object(heap, current, request, lim, m, other, goals);
+            return (envelope(heap, true, d), 0);
+        }
+    }
+}
+
+// `introspect`: the authority, the bounds, the limits -- what an agent needs to know before it asks. The
+// bounds are read from the safety core's own functions, so they cannot disagree with what runs.
+pub fn introspect[&h](heap: &!h Heap) -> [heap] buffer.Buffer {
+    var w = json.writer(heap, 512);
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "ok");
+    w = json.put_bool(heap, w, true);
+    w = json.put_key(heap, w, "command");
+    w = json.put_string(heap, w, "introspect");
+    w = json.put_key(heap, w, "schema");
+    w = json.put_string(heap, w, schema());
+    w = json.put_key(heap, w, "data");
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "authority");
+    w = json.put_string(heap, w, "io_read io_write; the ceiling is the proof that no bus is reachable");
+    w = json.put_key(heap, w, "bounds");
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "workspace_min_x");
+    w = json.put_float(heap, w, safety.workspace_min_x());
+    w = json.put_key(heap, w, "workspace_max_x");
+    w = json.put_float(heap, w, safety.workspace_max_x());
+    w = json.put_key(heap, w, "workspace_min_y");
+    w = json.put_float(heap, w, safety.workspace_min_y());
+    w = json.put_key(heap, w, "workspace_max_y");
+    w = json.put_float(heap, w, safety.workspace_max_y());
+    w = json.put_key(heap, w, "workspace_min_z");
+    w = json.put_float(heap, w, safety.workspace_min_z());
+    w = json.put_key(heap, w, "workspace_max_z");
+    w = json.put_float(heap, w, safety.workspace_max_z());
+    w = json.put_key(heap, w, "speed_limit");
+    w = json.put_float(heap, w, safety.speed_limit());
+    w = json.put_key(heap, w, "deadman_bound_ms");
+    w = json.put_int(heap, w, safety.deadman_bound_ms());
+    w = json.put_key(heap, w, "jump_base_deg");
+    w = json.put_float(heap, w, safety.jump_base_deg());
+    w = json.put_key(heap, w, "jump_per_cm_deg");
+    w = json.put_float(heap, w, safety.jump_per_cm_deg());
+    w = json.end_object(heap, w);
+    w = json.put_key(heap, w, "rules");
+    w = json.begin_array(heap, w);
+    var i = 0;
+    while i < rules.count() {
+        w = json.begin_object(heap, w);
+        w = json.put_key(heap, w, "tag");
+        w = json.put_string(heap, w, rules.tag_of(i));
+        w = json.put_key(heap, w, "exit");
+        w = json.put_int(heap, w, rules.exit_of(i));
+        w = json.put_key(heap, w, "repairable");
+        w = json.put_string(heap, w, rules.repairable_of(i));
+        w = json.put_key(heap, w, "summary");
+        w = json.put_string(heap, w, rules.summary_of(i));
+        w = json.end_object(heap, w);
+        i = i + 1;
+    }
+    w = json.end_array(heap, w);
+    w = json.end_object(heap, w);
+    w = json.put_key(heap, w, "meta");
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "version");
+    w = json.put_string(heap, w, version());
+    w = json.end_object(heap, w);
+    w = json.end_object(heap, w);
+    return json.finish(w);
+}
+
+// `skill`: how to ask, in one object.
+pub fn skill[&h](heap: &!h Heap) -> [heap] buffer.Buffer {
+    var w = json.writer(heap, 256);
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "ok");
+    w = json.put_bool(heap, w, true);
+    w = json.put_key(heap, w, "command");
+    w = json.put_string(heap, w, "skill");
+    w = json.put_key(heap, w, "schema");
+    w = json.put_string(heap, w, schema());
+    w = json.put_key(heap, w, "data");
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "summary");
+    w = json.put_string(heap, w, "what a motion would do, without sending anything: every check the safety core applies, named with its rule tag, and the goals it would commit; nothing here can reach a bus");
+    w = json.put_key(heap, w, "lines");
+    w = json.begin_array(heap, w);
+    w = json.put_string(heap, w, "{\"op\":\"introspect\"}");
+    w = json.put_string(heap, w, "{\"op\":\"skill\"}");
+    w = json.put_string(heap, w, "{\"op\":\"check\",\"side\":\"l or r\",\"current\":[5 angles in degrees],\"request\":[5 angles]}");
+    w = json.put_string(heap, w, "{\"op\":\"check\",\"side\":\"l or r\",\"current\":[5 angles],\"target\":[x,y,z metres]}");
+    w = json.end_array(heap, w);
+    w = json.put_key(heap, w, "authority");
+    w = json.put_string(heap, w, "io_read io_write; no bus, no fs, no net: the ceiling is the proof");
+    w = json.end_object(heap, w);
+    w = json.put_key(heap, w, "meta");
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "version");
+    w = json.put_string(heap, w, version());
+    w = json.end_object(heap, w);
+    w = json.end_object(heap, w);
+    return json.finish(w);
+}

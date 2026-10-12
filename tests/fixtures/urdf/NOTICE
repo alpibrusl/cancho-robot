@@ -1,0 +1,4 @@
+so101_new_calib.urdf is from TheRobotStudio/SO-ARM100 (https://github.com/TheRobotStudio/SO-ARM100),
+Simulation/SO101/so101_new_calib.urdf on `main`, licensed Apache-2.0. Copied unchanged
+(sha256 3a65d2d35e68a8d2f0c2cc176d19b884506543c93ba72980145b80abe276022c, checked against upstream on 2026-10-08).
+It is the file lex-robot's sidecar and LeRobot's RobotKinematics load for this arm.

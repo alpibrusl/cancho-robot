@@ -10,3 +10,4 @@ target/
 recordings/
 outputs/
 !docs/assets/*.png
+build/

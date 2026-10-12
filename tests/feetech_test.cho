@@ -1,0 +1,326 @@
+import std.test;
+import feetech;
+
+// What `feetech` builds and decodes, with no bus: the packets the spike (task #3) sent and the replies servo 1
+// sent back, captured on the real robot; each way a reply can be malformed; and the property the decoder is for:
+// no byte string makes it trap.
+
+fn set[&b, &s](buf: &!b [byte], hex: &s [byte]) -> [] int {
+    // `hex` is two digits per byte, no separators.
+    var i = 0;
+    while i * 2 + 1 < len(hex) {
+        buf[i] = byte_of(digit(int_of(hex[i * 2])) * 16 + digit(int_of(hex[i * 2 + 1])));
+        i = i + 1;
+    }
+    return i;
+}
+
+fn digit(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    return c - 'a' + 10;
+}
+
+fn same[&a, &b](x: &a [byte], y: &b [byte], n: int) -> [] bool {
+    var i = 0;
+    while i < n {
+        if int_of(x[i]) != int_of(y[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ── encoding: the spike's packets ──
+
+fn test_ping_servo_1_is_the_packet_the_spike_sent() -> [] int {
+    region a {
+        let out = alloc_slice[a](16, byte_of(0));
+        let want = alloc_slice[a](16, byte_of(0));
+        let n = set(want, "ffff010201fb");
+        test.assert_eq(feetech.ping(out, 1), n);
+        test.assert(same(out, want, n));
+    }
+    return 0;
+}
+
+fn test_read_present_position_is_the_packet_the_spike_sent() -> [] int {
+    region a {
+        let out = alloc_slice[a](16, byte_of(0));
+        let want = alloc_slice[a](16, byte_of(0));
+        let n = set(want, "ffff0104023802be");
+        test.assert_eq(feetech.read(out, 1, 56, 2), n);
+        test.assert(same(out, want, n));
+    }
+    return 0;
+}
+
+fn test_sync_read_of_six_servos() -> [] int {
+    region a {
+        let out = alloc_slice[a](32, byte_of(0));
+        let ids = alloc_slice[a](6, byte_of(0));
+        var i = 0;
+        while i < 6 {
+            ids[i] = byte_of(i + 1);
+            i = i + 1;
+        }
+        // FF FF FE 0A 82 38 02 01 02 03 04 05 06 chk: 14 bytes, the size docs/design.md section 5 budgets.
+        let n = feetech.sync_read(out, 56, 2, ids);
+        test.assert_eq(n, 14);
+        test.assert_eq(int_of(out[2]), 254);
+        test.assert_eq(int_of(out[3]), 10);
+        test.assert_eq(int_of(out[4]), 130);
+        test.assert_eq(int_of(out[13]), feetech.checksum(out, 2, 13));
+    }
+    return 0;
+}
+
+fn test_the_builders_refuse_what_they_cannot_send() -> [] int {
+    region a {
+        let out = alloc_slice[a](16, byte_of(0));
+        let tiny = alloc_slice[a](5, byte_of(0));
+        let none = alloc_slice[a](0, byte_of(0));
+        test.assert_eq(feetech.ping(out, 255), feetech.error_bad_id());
+        test.assert_eq(feetech.ping(out, 254), feetech.error_bad_id());
+        test.assert_eq(feetech.ping(out, -1), feetech.error_bad_id());
+        test.assert_eq(feetech.read(out, 254, 56, 2), feetech.error_bad_id());
+        test.assert_eq(feetech.read(out, 1, 256, 2), feetech.error_bad_argument());
+        test.assert_eq(feetech.read(out, 1, 56, 0), feetech.error_bad_argument());
+        test.assert_eq(feetech.read(tiny, 1, 56, 2), feetech.error_too_long());
+        test.assert_eq(feetech.sync_read(out, 56, 2, none), feetech.error_bad_argument());
+    }
+    return 0;
+}
+
+fn test_a_sync_read_too_long_for_one_packet_is_refused() -> [] int {
+    region a {
+        let out = alloc_slice[a](300, byte_of(0));
+        let ids = alloc_slice[a](243, byte_of(1));
+        test.assert_eq(feetech.sync_read(out, 56, 2, ids), feetech.error_too_long());
+        let fits = alloc_slice[a](242, byte_of(1));
+        test.assert_eq(feetech.sync_read(out, 56, 2, fits), 250);
+    }
+    return 0;
+}
+
+// ── decoding: the replies servo 1 sent ──
+
+fn test_the_ping_reply_from_servo_1() -> [] int {
+    region a {
+        let buf = alloc_slice[a](16, byte_of(0));
+        let t = alloc_slice[a](feetech.slots(), 0);
+        let n = set(buf, "00ffff010200fc");
+        // one stray byte first: skipped as noise, as scservo_sdk does
+        test.assert_eq(feetech.decode(buf[1..n], 1, t), 6);
+        test.assert_eq(t[0], 1);
+        test.assert_eq(t[1], 0);
+        test.assert_eq(t[3], 0);
+        test.assert_eq(t[4], 0);
+        test.assert_eq(feetech.decode(buf[0..n], 1, t), 7);
+        test.assert_eq(t[4], 1);
+    }
+    return 0;
+}
+
+fn test_the_position_reply_from_servo_1_is_1882_ticks() -> [] int {
+    region a {
+        let buf = alloc_slice[a](16, byte_of(0));
+        let t = alloc_slice[a](feetech.slots(), 0);
+        let n = set(buf, "ffff0104005a0799");
+        test.assert_eq(feetech.decode(buf[0..n], 1, t), 8);
+        test.assert_eq(t[3], 2);
+        test.assert_eq(feetech.u16(buf, t[2]), 1882);
+    }
+    return 0;
+}
+
+// ── decoding: each way a reply is wrong ──
+
+fn test_a_wrong_checksum_is_refused() -> [] int {
+    region a {
+        let buf = alloc_slice[a](16, byte_of(0));
+        let t = alloc_slice[a](feetech.slots(), 0);
+        let n = set(buf, "ffff0104005a0798");
+        test.assert_eq(feetech.decode(buf[0..n], 1, t), feetech.error_bad_checksum());
+    }
+    return 0;
+}
+
+fn test_a_reply_from_another_servo_is_refused() -> [] int {
+    region a {
+        let buf = alloc_slice[a](16, byte_of(0));
+        let t = alloc_slice[a](feetech.slots(), 0);
+        let n = set(buf, "ffff020200fb");
+        test.assert_eq(feetech.decode(buf[0..n], 1, t), feetech.error_wrong_id());
+        test.assert_eq(feetech.decode(buf[0..n], 2, t), 6);
+    }
+    return 0;
+}
+
+fn test_a_length_under_two_is_refused() -> [] int {
+    region a {
+        let buf = alloc_slice[a](16, byte_of(0));
+        let t = alloc_slice[a](feetech.slots(), 0);
+        var n = set(buf, "ffff010100fd");
+        test.assert_eq(feetech.decode(buf[0..n], 1, t), feetech.error_bad_length());
+        n = set(buf, "ffff010000fe");
+        test.assert_eq(feetech.decode(buf[0..n], 1, t), feetech.error_bad_length());
+    }
+    return 0;
+}
+
+fn test_every_proper_prefix_of_a_reply_needs_more() -> [] int {
+    region a {
+        let buf = alloc_slice[a](16, byte_of(0));
+        let t = alloc_slice[a](feetech.slots(), 0);
+        let n = set(buf, "ffff0104005a0799");
+        var k = 0;
+        while k < n {
+            test.assert_eq(feetech.decode(buf[0..k], 1, t), feetech.need_more());
+            k = k + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_an_impossible_header_is_skipped_as_noise() -> [] int {
+    region a {
+        let buf = alloc_slice[a](16, byte_of(0));
+        let t = alloc_slice[a](feetech.slots(), 0);
+        // FF FF FF FF: the first two FF FF pairs carry id 0xFF, which no servo has.
+        var n = set(buf, "ffffffff010200fc");
+        test.assert_eq(feetech.decode(buf[0..n], 1, t), 8);
+        test.assert_eq(t[4], 2);
+        // an error byte over 127 is not a status packet either
+        n = set(buf, "ffff010280");
+        test.assert_eq(feetech.decode(buf[0..n], 1, t), feetech.need_more());
+    }
+    return 0;
+}
+
+fn test_parameters_and_error_bits_come_back() -> [] int {
+    region a {
+        let buf = alloc_slice[a](16, byte_of(0));
+        let t = alloc_slice[a](feetech.slots(), 0);
+        // id 6, error 0x24 (overload and overheat), four parameter bytes
+        buf[0] = byte_of(255);
+        buf[1] = byte_of(255);
+        buf[2] = byte_of(6);
+        buf[3] = byte_of(6);
+        buf[4] = byte_of(36);
+        buf[5] = byte_of(1);
+        buf[6] = byte_of(2);
+        buf[7] = byte_of(3);
+        buf[8] = byte_of(4);
+        buf[9] = byte_of(feetech.checksum(buf, 2, 9));
+        test.assert_eq(feetech.decode(buf[0..10], 6, t), 10);
+        test.assert_eq(t[1], 36);
+        test.assert_eq(t[2], 5);
+        test.assert_eq(t[3], 4);
+    }
+    return 0;
+}
+
+// ── the property: no byte string makes the decoder trap ──
+
+fn alphabet(k: int) -> [] int {
+    // header bytes, the edges of id, length and error, and two checksums that occur above
+    if k == 0 {
+        return 255;
+    }
+    if k == 1 {
+        return 0;
+    }
+    if k == 2 {
+        return 1;
+    }
+    if k == 3 {
+        return 2;
+    }
+    if k == 4 {
+        return 253;
+    }
+    if k == 5 {
+        return 254;
+    }
+    if k == 6 {
+        return 128;
+    }
+    return 252;
+}
+
+fn test_no_string_of_up_to_six_bytes_makes_decode_trap() -> [] int {
+    // Every string of 0 to 5 bytes over the 8-letter alphabet (37,449 strings) and every 6-byte one over its first
+    // five letters (15,625), decoded with every expected id in {0, 1, 253}. A trap fails the test run; the
+    // assertions only say each answer is one of the documented ones.
+    region a {
+        let buf = alloc_slice[a](6, byte_of(0));
+        let t = alloc_slice[a](feetech.slots(), 0);
+        var size = 0;
+        while size <= 6 {
+            var letters = 8;
+            if size == 6 {
+                letters = 5;
+            }
+            var total = 1;
+            var i = 0;
+            while i < size {
+                total = total * letters;
+                i = i + 1;
+            }
+            var code = 0;
+            while code < total {
+                var c = code;
+                var j = 0;
+                while j < size {
+                    buf[j] = byte_of(alphabet(c % letters));
+                    c = c / letters;
+                    j = j + 1;
+                }
+                var e = 0;
+                while e < 3 {
+                    var want = 0;
+                    if e == 1 {
+                        want = 1;
+                    }
+                    if e == 2 {
+                        want = 253;
+                    }
+                    let r = feetech.decode(buf[0..size], want, t);
+                    test.assert(r >= feetech.error_bad_length() && r <= size);
+                    e = e + 1;
+                }
+                code = code + 1;
+            }
+            size = size + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_a_sync_read_naming_an_impossible_id_is_refused() -> [] int {
+    region a {
+        let out = alloc_slice[a](32, byte_of(0));
+        let ids = alloc_slice[a](3, byte_of(1));
+        ids[1] = byte_of(254);
+        test.assert_eq(feetech.sync_read(out, 56, 2, ids), feetech.error_bad_id());
+        ids[1] = byte_of(255);
+        test.assert_eq(feetech.sync_read(out, 56, 2, ids), feetech.error_bad_id());
+        ids[1] = byte_of(253);
+        test.assert_eq(feetech.sync_read(out, 56, 2, ids), 11);
+    }
+    return 0;
+}
+
+fn test_a_complete_packet_with_an_error_byte_over_127_is_not_a_reply() -> [] int {
+    region a {
+        let buf = alloc_slice[a](16, byte_of(0));
+        let t = alloc_slice[a](feetech.slots(), 0);
+        // FF FF 01 02 80 7C: the checksum is right, but no servo sets the top bit of the error byte
+        let n = set(buf, "ffff0102807c");
+        test.assert_eq(feetech.decode(buf[0..n], 1, t), feetech.need_more());
+    }
+    return 0;
+}

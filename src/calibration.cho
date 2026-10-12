@@ -1,0 +1,152 @@
+edition 5;
+
+module calibration;
+
+// `calibration` -- raw servo ticks to the values LeRobot reports, and back. Task #6 of the epic; gate C3 of
+// docs/design.md section 8 holds it to LeRobot's own arithmetic, compared bit for bit (tests/differential_calibration.py).
+//
+// LeRobot's SO-101 follower (`use_degrees` defaults to true) reads the five body joints in DEGREES and the gripper
+// in RANGE_0_100, from a calibration of `range_min`, `range_max` and `drive_mode` per motor (`motors_bus.py`,
+// `_normalize` and `_unnormalize`). Two things about that arithmetic are easy to get wrong and are kept here on
+// purpose, because matching it is the point:
+//
+//   * DEGREES ignores both the range bounds and `drive_mode`: (ticks - mid) * 360 / 4095, with mid the midpoint of
+//     the calibrated range. A tick outside the range gives an angle outside it.
+//   * RANGE_0_100 and RANGE_M100_100 clamp the ticks to the range, then flip by `drive_mode`; going back, they
+//     clamp the value, not the ticks.
+//
+// The order of every floating-point operation follows LeRobot's Python exactly (cancho's `float` is IEEE-754
+// binary64 with round-to-nearest-even, as Python's is), and going back truncates toward zero as Python's `int()`
+// does. Everything here is pure: reading the files is somebody else's job.
+//
+// Signs: the STS registers are sign-magnitude, not two's complement, with the sign at bit 15 for Present_Position
+// and Goal_Position, 11 for Homing_Offset and 10 for Present_Load (LeRobot's STS_SMS_SERIES_ENCODINGS_TABLE).
+
+// Ticks per turn on an STS3215, and the largest tick, which LeRobot divides by.
+pub fn resolution() -> [] int {
+    return 4096;
+}
+
+fn max_tick() -> [] float {
+    return 4095.0;
+}
+
+// LeRobot refuses a calibration whose min equals its max (it would divide by zero in the range modes). It does
+// not check that min is below max, and neither does this.
+pub fn usable(min: int, max: int) -> [] bool {
+    return min != max;
+}
+
+pub fn sign_bit_position() -> [] int {
+    return 15;
+}
+
+pub fn sign_bit_homing_offset() -> [] int {
+    return 11;
+}
+
+pub fn sign_bit_load() -> [] int {
+    return 10;
+}
+
+// A sign-magnitude register value to an integer. Bits above the sign bit are ignored, as LeRobot does.
+pub fn decode_sign(raw: int, bit: int) -> [] int {
+    let magnitude = raw & (1 << bit) - 1;
+    if raw >> bit & 1 == 1 {
+        return -magnitude;
+    }
+    return magnitude;
+}
+
+// An integer to a sign-magnitude register value, or -1 when its magnitude does not fit below the sign bit (LeRobot
+// raises ValueError; a register value is never negative, so -1 cannot be confused with one).
+pub fn encode_sign(value: int, bit: int) -> [] int {
+    var magnitude = value;
+    if value < 0 {
+        magnitude = -value;
+    }
+    if magnitude > (1 << bit) - 1 {
+        return -1;
+    }
+    if value < 0 {
+        return 1 << bit | magnitude;
+    }
+    return magnitude;
+}
+
+fn mid(min: int, max: int) -> [] float {
+    // Python: (min_ + max_) / 2, an exact integer sum, then true division.
+    return float_of(min + max) / 2.0;
+}
+
+// DEGREES: ticks to degrees. No clamp, no drive mode.
+pub fn degrees(ticks: int, min: int, max: int) -> [] float {
+    return (float_of(ticks) - mid(min, max)) * 360.0 / max_tick();
+}
+
+// DEGREES, back: degrees to ticks, truncated toward zero.
+pub fn ticks_of_degrees(value: float, min: int, max: int) -> [] int {
+    return truncate(value * max_tick() / 360.0 + mid(min, max));
+}
+
+// Python's `min(high, max(low, v))`, literally: `max` first, then `min`, so with low above high the high bound
+// wins. Written out rather than as a clamp because that order is the behaviour being matched.
+fn bound_int(v: int, low: int, high: int) -> [] int {
+    var at_least = v;
+    if low > v {
+        at_least = low;
+    }
+    if high < at_least {
+        return high;
+    }
+    return at_least;
+}
+
+fn bound_float(v: float, low: float, high: float) -> [] float {
+    var at_least = v;
+    if low > v {
+        at_least = low;
+    }
+    if high < at_least {
+        return high;
+    }
+    return at_least;
+}
+
+// RANGE_0_100 (the gripper): ticks to 0..100, clamped, flipped by `drive_mode`.
+pub fn percent(ticks: int, min: int, max: int, drive_mode: bool) -> [] float {
+    let bounded = bound_int(ticks, min, max);
+    let norm = float_of(bounded - min) / float_of(max - min) * 100.0;
+    if drive_mode {
+        return 100.0 - norm;
+    }
+    return norm;
+}
+
+pub fn ticks_of_percent(value: float, min: int, max: int, drive_mode: bool) -> [] int {
+    var v = value;
+    if drive_mode {
+        v = 100.0 - value;
+    }
+    let bounded = bound_float(v, 0.0, 100.0);
+    return truncate(bounded / 100.0 * float_of(max - min) + float_of(min));
+}
+
+// RANGE_M100_100 (body joints when `use_degrees` is off): ticks to -100..100.
+pub fn signed_percent(ticks: int, min: int, max: int, drive_mode: bool) -> [] float {
+    let bounded = bound_int(ticks, min, max);
+    let norm = float_of(bounded - min) / float_of(max - min) * 200.0 - 100.0;
+    if drive_mode {
+        return -norm;
+    }
+    return norm;
+}
+
+pub fn ticks_of_signed_percent(value: float, min: int, max: int, drive_mode: bool) -> [] int {
+    var v = value;
+    if drive_mode {
+        v = -value;
+    }
+    let bounded = bound_float(v, -100.0, 100.0);
+    return truncate((bounded + 100.0) / 200.0 * float_of(max - min) + float_of(min));
+}

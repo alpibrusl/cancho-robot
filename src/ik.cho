@@ -1,0 +1,325 @@
+edition 5;
+module ik;
+import std.math;
+import kinematics;
+import so101;
+
+// `ik` -- inverse kinematics for small Cartesian steps (task #7's second half, gate C4 of docs/design.md
+// section 8): damped least squares around the LIVE joint state, position only.
+//
+// The method is the one lex-robot arrived at on the real arm (PR alpibrusl/lex-robot#217, and its
+// `solve_joints`): a 5-DOF arm cannot generally reach an arbitrary orientation, so only the gripper's position
+// is constrained (placo's `orientation_weight=0`); the solver is differential -- each iteration linearises
+// around the state as it is NOW, never a cached pose (the stale-state defect: from a stale pose a 1 cm step
+// asked for 51 degrees, from a fresh one 3); and a solution that moves a joint further than the distance
+// justifies is refused, not returned (the safety core's `ik.jump` bound, checked here so the refusal is part
+// of the solve's answer rather than a caller's afterthought).
+//
+// The Jacobian is numeric, central differences through the same `kinematics.forward` the FK gate holds to
+// placo -- no second, divergent implementation of the chain to keep honest. The step solves the damped normal
+// equations (J^T J + lambda^2 I) dq = J^T e by Gaussian elimination, the matrix is symmetric positive definite
+// by construction, and every answer is a tagged status, never a panic.
+
+pub fn status_ok() -> [] int {
+    return 0;
+}
+
+pub fn status_unreachable() -> [] int {
+    return 1;
+} // did not converge within the iterations
+
+pub fn status_jump() -> [] int {
+    return 2;
+} // a joint moves further than the travel justifies
+
+pub fn status_limits() -> [] int {
+    return 3;
+} // the answer is outside the measured spans
+
+// The tuning, in the units the math happens in: radians and metres.
+pub fn damping_min() -> [] float {
+    return 0.001;
+} // lambda's floor: stability near convergence
+
+pub fn damping_of_error() -> [] float {
+    return 0.05;
+} // lambda scales with the error, so the tail
+
+// converges instead of coasting on the floor
+pub fn tolerance_m() -> [] float {
+    return 0.000001;
+} // the Cartesian error that counts as arrived
+
+pub fn max_iterations() -> [] int {
+    return 256;
+}
+
+pub fn jacobian_step_deg() -> [] float {
+    return 0.01;
+} // the finite difference's h, degrees
+
+// The gripper's position for the five angles in `degrees`, at `pose[3], pose[7], pose[11]`.
+fn position[&q, &p](degrees: &q [float], pose: &!p [float]) -> [] int {
+    return kinematics.forward(degrees, pose);
+}
+
+// The 3x5 position Jacobian at `degrees` (columns in m/rad), into `j` (15 floats, row-major: rows are x, y, z).
+// Central differences: (f(q + h) - f(q - h)) / 2h, the same chain the FK gate holds to placo.
+fn jacobian[&q, &j, &a, &p](degrees: &!q [float], j: &!j [float], scratch: &!a [float], pose: &!p [float]) -> [] int {
+    let h = jacobian_step_deg();
+    var c = 0;
+    while c < so101.moving() {
+        var saved = degrees[c];
+        degrees[c] = saved + h;
+        if position(degrees, pose) != 0 {
+            return -1;
+        }
+        let px = pose[3];
+        let py = pose[7];
+        let pz = pose[11];
+        degrees[c] = saved - h;
+        if position(degrees, pose) != 0 {
+            return -1;
+        }
+        // the difference over 2h in degrees, then radians: m/deg * deg = m; m/rad below.
+        let d = 2.0 * h * (pi() / 180.0);
+        j[c] = (px - pose[3]) / d;
+        j[5 + c] = (py - pose[7]) / d;
+        j[10 + c] = (pz - pose[11]) / d;
+        degrees[c] = saved;
+        c = c + 1;
+    }
+    return 0;
+}
+
+fn pi() -> [] float {
+    return 3.141592653589793;
+}
+
+// Solves the symmetric 5x5 system (J^T J + lambda^2 I) dq = J^T e in place: `a` holds the matrix row-major
+// (25 floats) and `b` the right hand side (5), which becomes the solution. Gaussian elimination; the matrix
+// is positive definite, so no pivoting is needed and a vanishing pivot is a refusal.
+fn solve5[&a, &b](a: &!a [float], b: &!b [float]) -> [] int {
+    var col = 0;
+    while col < 5 {
+        if math.fabs(a[col * 5 + col]) < 0.0000000001 {
+            return -1;
+        }
+        var row = col + 1;
+        while row < 5 {
+            let f = a[row * 5 + col] / a[col * 5 + col];
+            var k = col;
+            while k < 5 {
+                a[row * 5 + k] = a[row * 5 + k] - f * a[col * 5 + k];
+                k = k + 1;
+            }
+            b[row] = b[row] - f * b[col];
+            row = row + 1;
+        }
+        col = col + 1;
+    }
+    var r = 4;
+    while r >= 0 {
+        var s = b[r];
+        var k = r + 1;
+        while k < 5 {
+            s = s - a[r * 5 + k] * b[k];
+            k = k + 1;
+        }
+        b[r] = s / a[r * 5 + r];
+        r = r - 1;
+    }
+    return 0;
+}
+
+// One damped least squares step from `degrees` towards `target` (x, y, z, metres, the arm's own frame):
+// writes the step into `dq` (5 floats, radians). Answers 0, or -1 on a refused intermediate.
+fn step[&q, &t, &d, &w](degrees: &!q [float], target: &t [float], dq: &!d [float], work: &!w [float], lam: float) -> [] int {
+    // work: 15 Jacobian, 25 matrix, 5 rhs, 16 pose.
+    let j = work[0..15];
+    let a = work[15..40];
+    let b = work[40..45];
+    let pose = work[45..61];
+    if position(degrees, pose) != 0 {
+        return -1;
+    }
+    if jacobian(degrees, j, b, pose) != 0 {
+        return -1;
+    }
+    // The Jacobian leaves `pose` at the last perturbed state (q - h); the error is against the seed's pose,
+    // so recompute it before using it.
+    if position(degrees, pose) != 0 {
+        return -1;
+    }
+    // a = J^T J + lambda^2 I; b = J^T e, with lambda set by the caller (adaptive: the floor is
+    // damping_min, and lambda scales with the error so the last millimetres still move).
+    let lam2 = lam * lam;
+    var r = 0;
+    while r < 5 {
+        var c = 0;
+        while c < 5 {
+            var s = 0.0;
+            var k = 0;
+            while k < 3 {
+                s = s + j[k * 5 + r] * j[k * 5 + c];
+                k = k + 1;
+            }
+            a[r * 5 + c] = s;
+            c = c + 1;
+        }
+        a[r * 5 + r] = a[r * 5 + r] + lam2;
+        r = r + 1;
+    }
+    var e0 = target[0] - pose[3];
+    var e1 = target[1] - pose[7];
+    var e2 = target[2] - pose[11];
+    var rr = 0;
+    while rr < 5 {
+        b[rr] = j[rr] * e0 + j[5 + rr] * e1 + j[10 + rr] * e2;
+        rr = rr + 1;
+    }
+    if solve5(a, b) != 0 {
+        return -1;
+    }
+    var i = 0;
+    while i < 5 {
+        dq[i] = b[i];
+        i = i + 1;
+    }
+    return 0;
+}
+
+// One damped least squares step from `degrees` towards `target` (the differential's Jacobian comparison
+// against placo's single solve()): the proposed joint step in radians, into `dq` (5 floats). Answers 0 or
+// -1.
+pub fn one_step[&q, &t, &d, &w](degrees: &!q [float], target: &t [float], dq: &!d [float], work: &!w [float], lam: float) -> [] int {
+    return step(degrees, target, dq, work, lam);
+}
+
+// Inverse kinematics from the LIVE state: `current` (degrees, LeRobot's) is the seed and stays the seed of
+// every iteration's linearisation -- the state is re-read, never cached. `target` (x, y, z, metres, the
+// arm's own frame) is where the gripper should go. The answer goes into `solution` (degrees), the achieved
+// Cartesian error into `error_m`, and the iterations used into `iterations`. Answers status_ok, or
+// status_unreachable (not converged within max_iterations -- the target is out of reach, too far, or the
+// damping ate the step), or status_jump (a joint asked to move further than the travel justifies).
+//
+// The jump bound is the safety core's: 15 degrees plus 6 per centimetre of gripper travel, judged between the
+// live state and the solution. A refusal here is the answer to "where should the joints go", so a caller
+// cannot take a solution and skip the judgement.
+pub fn solve[&c, &t, &s, &l, &w](current: &c [float], target: &t [float], solution: &!s [float], limits: &l [float], error_m: &!w [float], iterations: &!w [int]) -> [] int {
+    if len(current) < so101.moving() || len(target) < 3 || len(solution) < so101.moving() {
+        return status_unreachable();
+    }
+    var i = 0;
+    while i < so101.moving() {
+        solution[i] = current[i];
+        i = i + 1;
+    }
+    error_m[0] = 0.0;
+    iterations[0] = 0;
+    region a {
+        let dq = alloc_slice[a](5, 0.0);
+        let work = alloc_slice[a](61, 0.0);
+        let pose = alloc_slice[a](16, 0.0);
+        var n = 0;
+        var converged = false;
+        while n < max_iterations() && !converged {
+            // lambda: the floor, or a fraction of the current error, whichever is larger.
+            let err = distance_to(solution, target);
+            var lam = damping_min();
+            let scaled = damping_of_error() * err;
+            if scaled > lam {
+                lam = scaled;
+            }
+            if step(solution, target, dq, work, lam) != 0 {
+                return status_unreachable();
+            }
+            var k = 0;
+            while k < so101.moving() {
+                // No clamp inside the iteration: the descent is the same unconstrained damped least
+                // squares placo runs, and clamping at a limit stalled the tail (measured: a solve pinned
+                // 0.03 deg past a limit settled 0.2 mm short of the target). Whether the ANSWER is inside
+                // the measured spans is judged once, below, the way the safety core judges a request.
+                solution[k] = solution[k] + dq[k] * (180.0 / pi());
+                k = k + 1;
+            }
+            iterations[0] = n + 1;
+            if position(solution, pose) != 0 {
+                return status_unreachable();
+            }
+            let dx = target[0] - pose[3];
+            let dy = target[1] - pose[7];
+            let dz = target[2] - pose[11];
+            error_m[0] = sqrt(dx * dx + dy * dy + dz * dz);
+            if error_m[0] <= tolerance_m() {
+                converged = true;
+            }
+            n = n + 1;
+        }
+        if !converged {
+            return status_unreachable();
+        }
+    }
+    // A solution outside the measured spans is refused with its own status: the solver's answer is where
+    // the joints should go, and the safety core would refuse exactly this request -- so the solve refuses
+    // it first, and the caller learns why rather than learning it later, on the bus.
+    if len(limits) >= so101.moving() * 2 {
+        var j1 = 0;
+        while j1 < so101.moving() {
+            if solution[j1] < limits[j1 * 2] || solution[j1] > limits[j1 * 2 + 1] {
+                return status_limits();
+            }
+            j1 = j1 + 1;
+        }
+    }
+    if jumps(current, solution) {
+        return status_jump();
+    }
+    return status_ok();
+}
+
+// The jump guard (lex-robot#217): does the move from `from_degrees` to `to_degrees` ask any joint to travel
+// further than the gripper's travel justifies? The bound is the safety core's: 15 degrees plus 6 per
+// centimetre of gripper travel.
+pub fn jumps[&f, &t](from_degrees: &f [float], to_degrees: &t [float]) -> [] bool {
+    var worst = 0.0;
+    var j = 0;
+    while j < so101.moving() {
+        let moved = math.fabs(to_degrees[j] - from_degrees[j]);
+        if moved > worst {
+            worst = moved;
+        }
+        j = j + 1;
+    }
+    let travel_cm = 100.0 * distance_m(from_degrees, to_degrees);
+    return worst > 15.0 + 6.0 * travel_cm;
+}
+
+// The gripper's current distance to `target` (x, y, z), metres.
+fn distance_to[&q, &t](degrees: &q [float], target: &t [float]) -> [] float {
+    region a {
+        let pose = alloc_slice[a](16, 0.0);
+        if kinematics.forward(degrees, pose) != 0 {
+            return 0.0;
+        }
+        let dx = target[0] - pose[3];
+        let dy = target[1] - pose[7];
+        let dz = target[2] - pose[11];
+        return sqrt(dx * dx + dy * dy + dz * dz);
+    }
+}
+
+// The gripper's travel between two joint states, metres.
+pub fn distance_m[&f, &t](from_degrees: &f [float], to_degrees: &t [float]) -> [] float {
+    region a {
+        let p0 = alloc_slice[a](16, 0.0);
+        let p1 = alloc_slice[a](16, 0.0);
+        if kinematics.forward(from_degrees, p0) != 0 || kinematics.forward(to_degrees, p1) != 0 {
+            return 0.0;
+        }
+        let dx = p1[3] - p0[3];
+        let dy = p1[7] - p0[7];
+        let dz = p1[11] - p0[11];
+        return sqrt(dx * dx + dy * dy + dz * dz);
+    }
+}

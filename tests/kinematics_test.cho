@@ -1,0 +1,97 @@
+import std.test;
+import kinematics;
+
+// What `kinematics.forward` must be, besides equal to placo (tests/differential_kinematics.py): a rigid transform,
+// the zero pose placo reports, and the geometry of the first joint.
+
+fn close(a: float, b: float, tol: float) -> [] bool {
+    let d = a - b;
+    return d < tol && d > -tol;
+}
+
+fn pose_at[&a, &p](q0: float, q1: float, q2: float, q3: float, q4: float, q: &!a [float], pose: &!p [float]) -> [] int {
+    q[0] = q0;
+    q[1] = q1;
+    q[2] = q2;
+    q[3] = q3;
+    q[4] = q4;
+    return kinematics.forward(q, pose);
+}
+
+fn test_the_zero_pose_is_where_placo_puts_it() -> [] int {
+    region a {
+        let q = alloc_slice[a](5, 0.0);
+        let pose = alloc_slice[a](16, 0.0);
+        test.assert_eq(pose_at(0.0, 0.0, 0.0, 0.0, 0.0, q, pose), 0);
+        // placo (LeRobot's RobotKinematics) on the same URDF, all joints at zero
+        test.assert(close(pose[3], 0.3913614702201581, 0.000000000001));
+        test.assert(close(pose[7], -9.212063114501261e-06, 0.000000000001));
+        test.assert(close(pose[11], 0.2264697102403328, 0.000000000001));
+    }
+    return 0;
+}
+
+fn test_the_pose_is_a_rigid_transform() -> [] int {
+    region a {
+        let q = alloc_slice[a](5, 0.0);
+        let pose = alloc_slice[a](16, 0.0);
+        pose_at(-21.3, 64.5, 2.7, -27.5, 18.0, q, pose);
+        // rows of the rotation are unit length and orthogonal; the last row is 0 0 0 1
+        var r = 0;
+        while r < 3 {
+            var s = 0;
+            while s < 3 {
+                let dot = pose[r * 4] * pose[s * 4] + pose[r * 4 + 1] * pose[s * 4 + 1] + pose[r * 4 + 2] * pose[s * 4 + 2];
+                if r == s {
+                    test.assert(close(dot, 1.0, 0.000000000001));
+                } else {
+                    test.assert(close(dot, 0.0, 0.000000000001));
+                }
+                s = s + 1;
+            }
+            r = r + 1;
+        }
+        test.assert(pose[12] == 0.0 && pose[13] == 0.0 && pose[14] == 0.0 && pose[15] == 1.0);
+    }
+    return 0;
+}
+
+fn test_turning_the_base_keeps_the_height_and_the_distance_from_its_axis() -> [] int {
+    // shoulder_pan turns about an axis through its origin (x 0.0388353, y ~0 in base_link) that would be vertical,
+    // except that the URDF writes pi as 3.14159: the joint's roll of 3.14159 tilts it by 2.65e-6 rad. So the height
+    // and the horizontal distance from the axis are kept to about a micrometre, not exactly -- measured: a 75-degree
+    // turn moves the height by under 2e-6 m. placo models the same tilt (the differential test is exact).
+    region a {
+        let q = alloc_slice[a](5, 0.0);
+        let p0 = alloc_slice[a](16, 0.0);
+        let p1 = alloc_slice[a](16, 0.0);
+        pose_at(0.0, 30.0, -40.0, 20.0, 10.0, q, p0);
+        pose_at(75.0, 30.0, -40.0, 20.0, 10.0, q, p1);
+        test.assert(close(p0[11], p1[11], 0.00001));
+        let dx0 = p0[3] - 0.0388353;
+        let dx1 = p1[3] - 0.0388353;
+        let d0 = dx0 * dx0 + p0[7] * p0[7];
+        let d1 = dx1 * dx1 + p1[7] * p1[7];
+        test.assert(close(d0, d1, 0.00001));
+        test.assert(!close(p0[3], p1[3], 0.01));
+    }
+    return 0;
+}
+
+fn test_degrees_are_converted_as_numpy_does() -> [] int {
+    test.assert(kinematics.radians(180.0) == 3.141592653589793);
+    test.assert(kinematics.radians(0.0) == 0.0);
+    return 0;
+}
+
+fn test_too_few_angles_or_too_small_a_pose_is_refused() -> [] int {
+    region a {
+        let four = alloc_slice[a](4, 0.0);
+        let five = alloc_slice[a](5, 0.0);
+        let small = alloc_slice[a](15, 0.0);
+        let pose = alloc_slice[a](16, 0.0);
+        test.assert_eq(kinematics.forward(four, pose), -1);
+        test.assert_eq(kinematics.forward(five, small), -1);
+    }
+    return 0;
+}

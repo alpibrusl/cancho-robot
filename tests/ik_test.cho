@@ -1,0 +1,231 @@
+import std.test;
+import std.math;
+import ik;
+import kinematics;
+import so101;
+
+// What `ik.solve` must be, besides equal to placo's steps (tests/differential_ik.py): a small step converges
+// to the target, the seed's neighbourhood is where the answer lives, an unreachable target is refused with
+// the joints parked at their limits, and the two lex-robot#217 lessons hold -- the solve linearises around
+// the live state, and a solution that jumps further than the travel justifies is refused.
+
+fn close(a: float, b: float, tol: float) -> [] bool {
+    let d = a - b;
+    return d < tol && d > -tol;
+}
+
+fn limits[&l](l: &!l [float]) -> [] int {
+    l[0] = -113.2;
+    l[1] = 113.2; // shoulder_pan
+    l[2] = -90.5;
+    l[3] = 90.5; // shoulder_lift
+    l[4] = -95.4;
+    l[5] = 95.4; // elbow_flex
+    l[6] = -75.3;
+    l[7] = 75.3; // wrist_flex
+    l[8] = -180.0;
+    l[9] = 180.0; // wrist_roll
+    return 0;
+}
+
+fn pose_of[&q, &p](q: &q [float], pose: &!p [float]) -> [] int {
+    return kinematics.forward(q, pose);
+}
+
+fn test_a_small_step_reaches_the_target() -> [] int {
+    region a {
+        let current = alloc_slice[a](5, 0.0);
+        let target = alloc_slice[a](3, 0.0);
+        let solution = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let error_m = alloc_slice[a](1, 0.0);
+        let iterations = alloc_slice[a](1, 0);
+        limits(lim);
+        // FK at zero puts the gripper at (0.3914, 0, 0.2265); ask for 2 cm further out along x.
+        target[0] = 0.41;
+        target[1] = 0.0;
+        target[2] = 0.2265;
+        let status = ik.solve(current, target, solution, lim, error_m, iterations);
+        test.assert_eq(status, ik.status_ok());
+        // the achieved position is the target
+        let pose = alloc_slice[a](16, 0.0);
+        pose_of(solution, pose);
+        test.assert(close(pose[3], 0.41, 0.00001));
+        test.assert(close(pose[7], 0.0, 0.00001));
+        test.assert(close(pose[11], 0.2265, 0.00001));
+        // and it converged in a handful of iterations, not the whole budget
+        test.assert(iterations[0] < 16);
+    }
+    return 0;
+}
+
+fn test_a_target_outside_the_arms_reach_is_refused_not_faked() -> [] int {
+    region a {
+        let current = alloc_slice[a](5, 0.0);
+        let target = alloc_slice[a](3, 0.0);
+        let solution = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let error_m = alloc_slice[a](1, 0.0);
+        let iterations = alloc_slice[a](1, 0);
+        limits(lim);
+        target[0] = 2.0;
+        target[1] = 0.0;
+        target[2] = 2.0;
+        let status = ik.solve(current, target, solution, lim, error_m, iterations);
+        // refused: either it never converged (unreachable) or it converged through joints outside the
+        // measured spans (limits) -- both honest, both distinct from ok
+        test.assert(status != ik.status_ok());
+        // and the answer never claims to be at the target
+        test.assert(error_m[0] > 0.01);
+    }
+    return 0;
+}
+
+fn test_the_solve_starts_from_the_live_state_not_a_cached_one() -> [] int {
+    // lex-robot#217's stale-state lesson: the same target solved from two different live states must give
+    // two answers that each belong to their own state's neighbourhood. From the zero pose the 2 cm step
+    // costs about 10 degrees of shoulder_lift; from a pose already near the target it costs almost nothing.
+    region a {
+        let target = alloc_slice[a](3, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let error_m = alloc_slice[a](1, 0.0);
+        let iterations = alloc_slice[a](1, 0);
+        limits(lim);
+        target[0] = 0.41;
+        target[1] = 0.0;
+        target[2] = 0.2265;
+
+        let far = alloc_slice[a](5, 0.0);
+        let far_sol = alloc_slice[a](5, 0.0);
+        test.assert_eq(ik.solve(far, target, far_sol, lim, error_m, iterations), ik.status_ok());
+        test.assert(math.fabs(far_sol[1]) > 5.0); // a real move from zero
+
+        // the second solve starts from the FIRST's answer: already there, so barely any joint moves
+        let near_sol = alloc_slice[a](5, 0.0);
+        test.assert_eq(ik.solve(far_sol, target, near_sol, lim, error_m, iterations), ik.status_ok());
+        var i = 0;
+        while i < 5 {
+            test.assert(math.fabs(near_sol[i] - far_sol[i]) < 1.0);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_a_zero_cartesian_step_from_a_live_pose_stays_at_that_pose() -> [] int {
+    // lex-robot#217's live-state lesson, the other way round: a target the arm already reaches must be
+    // solved as "stay where you are". A solver seeded from anywhere but the live state answers with a
+    // different branch's joints, which the jump guard refuses -- so this test catches a stale seed.
+    region a {
+        let current = alloc_slice[a](5, 0.0);
+        current[0] = -21.3;
+        current[1] = 64.5;
+        current[2] = 2.7;
+        current[3] = -27.5;
+        current[4] = 18.0;
+        let pose = alloc_slice[a](16, 0.0);
+        kinematics.forward(current, pose);
+        let target = alloc_slice[a](3, 0.0);
+        target[0] = pose[3];
+        target[1] = pose[7];
+        target[2] = pose[11];
+        let solution = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let error_m = alloc_slice[a](1, 0.0);
+        let iterations = alloc_slice[a](1, 0);
+        limits(lim);
+        let status = ik.solve(current, target, solution, lim, error_m, iterations);
+        test.assert_eq(status, ik.status_ok());
+        var i = 0;
+        while i < 5 {
+            test.assert(math.fabs(solution[i] - current[i]) < 1.0);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_the_jump_guard_is_the_bound_the_safety_core_names() -> [] int {
+    // The guard itself: 140 degrees of wrist roll moves the gripper 1.5 cm (measured through the FK), and
+    // the bound at 1.5 cm is 15 + 6 * 1.485 = 23.9 degrees, so the move is a jump. A small pose change is
+    // not. This pins the guard's arithmetic, which the solve's own refusal depends on.
+    region a {
+        let from = alloc_slice[a](5, 0.0);
+        let to = alloc_slice[a](5, 0.0);
+        from[4] = -70.0;
+        to[4] = 70.0; // 140 degrees of roll
+        test.assert(ik.jumps(from, to));
+        to[4] = 10.0; // 80 degrees of roll for the same travel
+        test.assert(ik.jumps(from, to));
+        to[4] = -65.0; // 5 degrees: inside the base allowance
+        test.assert(!ik.jumps(from, to));
+        // and the same 140 degrees of shoulder_pan, which swings the gripper far: not a jump
+        from[4] = 0.0;
+        to[4] = 0.0;
+        from[0] = -70.0;
+        to[0] = 70.0;
+        test.assert(!ik.jumps(from, to));
+    }
+    return 0;
+}
+
+fn test_a_solution_outside_the_measured_spans_is_refused_not_faked() -> [] int {
+    // A target the descent reaches only by bending the elbow 0.06 degrees past its measured span (the
+    // boundary case the differential found on the recorded poses): the Cartesian answer exists, but the
+    // arm has not got those joints, so the solve refuses with status_limits -- the caller learns it from
+    // the answer, not from the bus.
+    region a {
+        let current = alloc_slice[a](5, 0.0);
+        current[0] = -6.6;
+        current[1] = -65.9;
+        current[2] = 92.0;
+        current[3] = -74.9;
+        current[4] = -106.5;
+        let target = alloc_slice[a](3, 0.0);
+        target[0] = 0.22094865368480424;
+        target[1] = 0.021945582965232312;
+        target[2] = 0.22440711103416214;
+        let solution = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let error_m = alloc_slice[a](1, 0.0);
+        let iterations = alloc_slice[a](1, 0);
+        limits(lim);
+        let status = ik.solve(current, target, solution, lim, error_m, iterations);
+        test.assert_eq(status, ik.status_limits());
+        // and the refused answer really is the one past the span
+        test.assert(solution[2] > lim[5]);
+    }
+    return 0;
+}
+
+fn test_a_solution_that_jumps_further_than_the_travel_justifies_is_refused() -> [] int {
+    // The other half of lex-robot#217: a solve whose answer moves one joint far more than the gripper's
+    // travel justifies is refused (status_jump), not returned for the safety core to catch. The case is the
+    // one the stale-state defect produced on the real arm: a 1 cm step that asked for 51 degrees. Here the
+    // target is 1 cm from the seed and the arm is posed so the descent reaches it through a big joint swing.
+    region a {
+        let current = alloc_slice[a](5, 0.0);
+        let target = alloc_slice[a](3, 0.0);
+        let solution = alloc_slice[a](5, 0.0);
+        let lim = alloc_slice[a](10, 0.0);
+        let error_m = alloc_slice[a](1, 0.0);
+        let iterations = alloc_slice[a](1, 0);
+        limits(lim);
+        // wrist_roll spins the gripper about its own axis: a target it can satisfy costs 100 degrees of roll
+        // for millimetres of travel. Seed 100 degrees of roll away from the pose that reaches the target.
+        current[4] = 100.0;
+        let pose = alloc_slice[a](16, 0.0);
+        pose_of(current, pose);
+        target[0] = pose[3] + 0.005; // 5 mm of gripper travel
+        target[1] = pose[7];
+        target[2] = pose[11];
+        let status = ik.solve(current, target, solution, lim, error_m, iterations);
+        // either the step was small enough to stay within the bound (roll barely moves), or it is refused
+        if status == ik.status_ok() {
+            test.assert(math.fabs(solution[4] - current[4]) < 15.0 + 6.0 * 10.0 * 0.005);
+        } else {
+            test.assert_eq(status, ik.status_jump());
+        }
+    }
+    return 0;
+}
