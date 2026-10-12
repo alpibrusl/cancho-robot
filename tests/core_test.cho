@@ -19,15 +19,16 @@ fn test_a_goal_leads_the_present_position_by_at_most_the_bound() -> [] int {
 }
 
 fn test_the_limits_are_the_calibration_spans_in_degrees() -> [] int {
-    // xle_left.json shoulder_pan: 884..3460 ticks, so +-113.2 degrees about the range's middle.
+    // The left arm is calibrated by xle_right.json (measured by hand, 2026-10-12): shoulder_pan 771..3065 ticks,
+    // so +-100.8 degrees about the range's middle.
     region a {
         let lim = alloc_slice[a](10, 0.0);
         core.limits_of(robot.left(), lim);
-        test.assert(lim[0] < -113.1 && lim[0] > -113.3);
-        test.assert(lim[1] > 113.1 && lim[1] < 113.3);
-        // xle_right.json wrist_flex: 896..3206, +-101.5
+        test.assert(lim[0] < -100.7 && lim[0] > -100.9);
+        test.assert(lim[1] > 100.7 && lim[1] < 100.9);
+        // The right arm, by xle_left.json: wrist_flex 2060..3773, +-75.3
         core.limits_of(robot.right(), lim);
-        test.assert(lim[6] < -101.4 && lim[6] > -101.6);
+        test.assert(lim[6] < -75.2 && lim[6] > -75.4);
     }
     return 0;
 }

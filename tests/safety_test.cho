@@ -13,7 +13,7 @@ fn close(a: float, b: float, tol: float) -> [] bool {
     return d < tol && d > -tol;
 }
 
-// The measured joint limits of this robot's left arm (tests/fixtures/calibration/xle_left.json, the spans
+// The measured joint limits of one of this robot's arms (tests/fixtures/calibration/xle_left.json: the physical RIGHT arm's, measured by hand on 2026-10-12; the spans
 // calibration.degrees reports for range_min..range_max), degrees.
 fn limits[&l](l: &!l [float]) -> [] int {
     // shoulder_pan: 884..3460 ticks around homing -281 -> LeRobot's degrees span, widened to the round numbers

@@ -45,12 +45,14 @@ TORQUE_ENABLE, GOAL_POSITION, PRESENT_POSITION, PRESENT_LOAD = 40, 42, 56, 60
 PRESENT_VOLTAGE, PRESENT_TEMPERATURE, MOVING = 62, 63, 66
 TICKS_PER_S = 3000.0  # STS3215 no-load: about 0.22 s per 60 degrees
 
-# Present_Position as tools/scan read the robot on 2026-10-12 (docs/research-log.md), per ARM (the arm whose servos
-# carry that calibration file), and the tower and wheel servos, which stay with their bus.
+# Present_Position as tools/scan read the robot on 2026-10-12 (docs/research-log.md), per PHYSICAL arm, and the
+# tower (on the left arm's bus) and wheel (on the right's) servos. The left arm's servos carry xle_right.json's
+# calibration and the right's xle_left.json's: LeRobot's names are the other way round (measured by hand).
 ARMS = {
-    "left": {1: 2056, 2: 1049, 3: 3062, 4: 2049, 5: 717, 6: 2042},
-    "right": {1: 1885, 2: 425, 3: 3041, 4: 901, 5: 2085, 6: 2056},
+    "left": {1: 1885, 2: 425, 3: 3041, 4: 901, 5: 2085, 6: 2056},
+    "right": {1: 2056, 2: 1049, 3: 3061, 4: 2049, 5: 716, 6: 2042},
 }
+FILE_OF = {"left": "xle_right.json", "right": "xle_left.json"}
 EXTRAS = {"left": {7: 1508, 8: 3387}, "right": {9: 1302, 10: 2668}}
 CALIBRATION = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "calibration"
 HOMING_OFFSET, MIN_LIMIT, MAX_LIMIT = 31, 9, 11
@@ -115,7 +117,7 @@ class Bus:
     def __init__(self, name, path, arm, trace):
         self.name = name
         self.servos = {i: Servo(i, p) for i, p in {**ARMS[arm], **EXTRAS[name]}.items()}
-        cal = json.loads((CALIBRATION / f"xle_{arm}.json").read_text())
+        cal = json.loads((CALIBRATION / FILE_OF[arm]).read_text())
         for joint in cal.values():
             servo = self.servos[joint["id"]]
             offset = joint["homing_offset"]

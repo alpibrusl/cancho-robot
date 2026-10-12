@@ -24,7 +24,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SIM = ROOT / "sim" / "fake_bus.py"
-CAL = {s: json.loads((ROOT / "tests" / "fixtures" / "calibration" / f"xle_{s}.json").read_text()) for s in ("left", "right")}
+CAL = {s: json.loads((ROOT / "tests" / "fixtures" / "calibration" / f).read_text())
+       for s, f in (("left", "xle_right.json"), ("right", "xle_left.json"))}
 GOAL, TORQUE, PRESENT = 42, 40, 56
 DEG = 4096 / 360.0
 LEAD_TICKS = 8.0 * DEG
