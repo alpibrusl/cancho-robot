@@ -40,6 +40,25 @@ The report should say *which buses* the controller can touch, the way cancho-dns
 
 The bus runs at 1 Mbaud, a servo answers a read in a median of 0.33 ms (measured by lex-robot's bus check on this robot), and the Python keyboard teleoperation already runs at 30 Hz and feels smooth. The aim is not speed. It is a controller whose authority report, safety refusals and kinematics are each checked against an independent reference (LeRobot reading the same bus, its solver on the same poses), with every difference written down.
 
+## Playground
+
+`tools/play` drives the arms one command at a time, every step through the safety core, on the robot or on a simulated bus that speaks
+the same Feetech protocol from the robot's own calibration and rest positions (`sim/fake_bus.py`; the controller cannot tell the two
+apart, and the simulated bus logs every byte that reaches a servo).
+
+```sh
+cancho build --std tools/play.cho src/core.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho \
+  src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho -o build/play
+python3 sim/fake_bus.py --trace /tmp/bus.jsonl &       # add --crossed, or --obstacle right:3:2900, to try those
+build/play --sim
+> torque l on
+> move l lift 30
+> move l lift -40          # refused: collision.tower -- the arm would move closer to the tower
+> check r wrist 20
+```
+
+Without `--sim` it opens the robot's two buses on the Raspberry Pi. That moves real arms: an operator at the e-stop, every time.
+
 ## Project page
 
 [alpibrusl.github.io/cancho-robot](https://alpibrusl.github.io/cancho-robot/) (served from `docs/`).

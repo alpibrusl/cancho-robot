@@ -39,6 +39,8 @@ extern fn write[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &b [byte]) -> [ffi("l
 
 extern fn clock_gettime[&f, &b](ffi: &f Ffi("libc"), clock: int, ts: &!b [byte]) -> [ffi("libc")] c_int;
 
+extern fn usleep[&f](ffi: &f Ffi("libc"), us: int) -> [ffi("libc")] c_int;
+
 // ── glibc 2.41, aarch64 (spikes/ping/abi_linux.c) ────────────────────────────────────────────────────────────
 
 fn o_rdwr() -> [] int {
@@ -180,6 +182,12 @@ pub fn now_us[&f](ffi: &f Ffi("libc")) -> [ffi("libc")] int {
     return us;
 }
 
+// Sleep for `us` microseconds: the console's pacing between steps, never inside a transaction.
+pub fn sleep_us[&f](ffi: &f Ffi("libc"), us: int) -> [ffi("libc")] int {
+    usleep(ffi, us);
+    return 0;
+}
+
 // ── the bus ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 // Open `path` (which must end in a NUL byte) raw at 1,000,000 baud, non-blocking. Answers the descriptor, or
@@ -259,4 +267,14 @@ pub fn transact[&f, &p, &r, &t](ffi: &f Ffi("libc"), fd: int, pkt: &p [byte], n:
         }
     }
     return error_timeout();
+}
+
+// Send `pkt[0..n]` and expect no answer: SYNC WRITE and broadcast instructions, which no servo acknowledges. What
+// the bytes are is decided by whoever built them; the only builders of write instructions are in
+// `feetech_write`, and the only caller of this is `serial_write` (gate A3).
+pub fn send[&f, &p](ffi: &f Ffi("libc"), fd: int, pkt: &p [byte], n: int) -> [ffi("libc")] int {
+    if write(ffi, fd, pkt[0..n]) != n {
+        return error_write();
+    }
+    return n;
 }

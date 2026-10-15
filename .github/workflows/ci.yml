@@ -175,6 +175,27 @@ jobs:
       - name: Scan authority is within its ceiling (libc for the bus, no write builder)
         working-directory: robot
         run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/scan.ceiling tools/scan.cho src/serial.cho src/feetech.cho
+      - name: The robot's tables are generated from its calibration files (scripts/gen_robot.py)
+        working-directory: robot
+        run: python3 scripts/gen_robot.py tests/fixtures/calibration --check src/robot.cho
+      - name: Core tests (the lead bound, units, limits, mounts)
+        working-directory: robot
+        run: ../cancho/target/release/cancho test tests/core_test.cho src/core.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho --std
+      - name: Build the playground console (task #9)
+        working-directory: robot
+        run: ../cancho/target/release/cancho build --std tools/play.cho src/core.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho -o build/play
+      - name: Actuation against the simulated bus, judged from the bus's own trace (task #9, G1-G6)
+        working-directory: robot
+        run: python3 tests/actuation_gates.py build/play
+      - name: The actuation gates can fail (each deliberately wrong actuation is caught)
+        working-directory: robot
+        run: python3 tests/mutate_actuation.py ../cancho/target/release/cancho
+      - name: The write path is the one the design draws (gate A3), and the check can fail
+        working-directory: robot
+        run: python3 tests/write_path_check.py --self-test
+      - name: Playground authority is within its ceiling
+        working-directory: robot
+        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/play.ceiling tools/play.cho src/core.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho
       - name: The toolbox contract tests (the catalogue, the tags the design names)
         working-directory: robot
         run: ../cancho/target/release/cancho test tests/check_test.cho src/check.cho src/rules.cho src/safety.cho src/ik.cho src/kinematics.cho src/so101.cho --std
