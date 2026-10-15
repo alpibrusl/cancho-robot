@@ -262,7 +262,13 @@ fn drive[&f, &i, &d, &h, &s](ffi: &f Ffi("libc"), io: &!i Io, fds: &d [int], sid
                 }
                 if moving {
                     let n = other_arm(ffi, fds, side, other5);
-                    let rule = core.commit(ffi, fd, side, request, present, held, other5[0..n], 0, 20, goals, joint);
+                    var rule = core.commit(ffi, fd, side, request, present, held, other5[0..n], 0, 20, goals, joint);
+                    // One joint at its span: the others keep moving. The request is asked again with that joint held
+                    // where it is -- a second request, through the same commit, not a way around it.
+                    if rule == safety.rule_joint() && joint[0] >= 0 {
+                        request[joint[0]] = held[joint[0]];
+                        rule = core.commit(ffi, fd, side, request, present, held, other5[0..n], 0, 20, goals, joint);
+                    }
                     if rule == safety.rule_ok() {
                         var g = 0;
                         while g < robot.joints() {

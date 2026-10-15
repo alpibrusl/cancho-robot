@@ -7,11 +7,13 @@ simulated bus's trace -- what reached the servos, and when -- on the same monoto
 
   T1  a held key moves its joint, the right way (q raises the shoulder: its goal ticks grow);
   T2  no backlog: after a release the joint's goal stops changing within two cycles (40 ms);
-  T3  keys combine (kitty): q and s held together move the shoulder and the elbow in the same cycles;
+  T3  keys combine (kitty): q and w held together move the shoulder and the elbow in the same cycles;
   T4  a connection that stops carrying events while a key is down stops the arm (the 1 s guard);
   T5  plain characters (a terminal without the protocol): a key held by its repeats moves, and stops when the
       repeats stop, within the repeat guard (150 ms) and two cycles;
-  T6  the terminal is put back and the program says so; torque stays on (no torque write but the first).
+  T6  the terminal is put back and the program says so; torque stays on (no torque write but the first);
+  T7  one joint at its span does not stop the others: with the elbow at the top of its span, a and s held together
+      still lower the shoulder (the request is asked again with the limited joint held).
 
 Usage:  python3 tests/teleop_gates.py build/teleop
 """
@@ -95,7 +97,7 @@ class Terminal:
         return self.out.decode("utf-8", "replace")
 
 
-CODES = {"q": 113, "s": 115, "a": 97}
+CODES = {"q": 113, "s": 115, "w": 119, "a": 97}
 
 
 def goal_writes(rows, ident):
@@ -164,8 +166,14 @@ def main():
         m["q_down"] = term.hold(["q"], 1.0, CODES)
         m["q_up"] = term.up(["q"], CODES)
         term.pump(0.6)
-        m["qs_down"] = term.hold(["q", "s"], 0.6, CODES)
-        m["qs_up"] = term.up(["q", "s"], CODES)
+        m["qs_down"] = term.hold(["q", "w"], 0.6, CODES)
+        m["qs_up"] = term.up(["q", "w"], CODES)
+        term.pump(0.6)
+        m["lim_down"] = term.hold(["s"], 1.5, CODES)  # the elbow up to the top of its span
+        term.up(["s"], CODES)
+        term.pump(0.3)
+        m["qlim_down"] = term.hold(["a", "s"], 0.6, CODES)  # the elbow at its span, the shoulder down: still moves
+        m["qlim_up"] = term.up(["a", "s"], CODES)
         term.pump(0.6)
         m["quiet_down"] = term.hold(["a"], 0.3, CODES)  # a: the shoulder down, then nothing more is sent
         m["quiet_last"] = time.monotonic()
@@ -190,6 +198,9 @@ def main():
     quiet = changes(lift, m["quiet_down"])
     gate("T4 a connection gone quiet stops the arm", quiet and max(t for t, _ in quiet) <= guard_end,
          f"last change {max(t for t, _ in quiet) - m['quiet_last']:.2f} s after the last event" if quiet else "never moved")
+    lim = changes(lift, m["qlim_down"], m["qlim_up"])
+    gate("T7 one joint at its span does not stop the others", len(lim) >= 5,
+         f"{len(lim)} lift changes while the elbow was held at its span")
     gate("T6 the terminal is restored and torque stays on",
          "torque stays on" in out and len(torque_writes(rows)) == 1 and "key-up to stop" in out,
          [l for l in out.splitlines() if "key-up" in l])
