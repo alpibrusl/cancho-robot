@@ -1,0 +1,405 @@
+edition 5;
+
+import std.io;
+import core;
+import robot;
+import serial;
+import safety;
+import keys;
+import term;
+
+// `teleop` -- task #10: drive one arm from the keyboard, joint by joint, at 50 Hz, every step through core.commit.
+//
+//     teleop <l|r>          the robot (an operator at the e-stop)
+//     teleop <l|r> --sim    the simulated bus
+//
+// Keys (the operator's layout, src/keys.cho): q/a lift, s/w elbow, p/o pan, i/k wrist, l/n-tilde roll, space/m
+// gripper; shift for a quarter of the speed; Esc or Ctrl-C to stop. In a terminal that speaks the kitty keyboard
+// protocol keys combine and a release stops a joint at once; elsewhere one key at a time, released when its
+// repeats stop. Which one it got is printed at the start.
+//
+// On the way out it prints the time from each key release to its joint stopping (the gate of task #10: no backlog
+// after release). Torque stays on: the arm holds where it stopped.
+
+fn say[&i, &t](io: &!i Io, text: &t [byte]) -> [io_write] int {
+    return io.write_all(io, text);
+}
+
+// Esc followed by `rest`: a string literal has no escape for 27.
+fn esc[&i, &t](io: &!i Io, rest: &t [byte]) -> [io_write] int {
+    putchar(io, 27);
+    return io.write_all(io, rest);
+}
+
+fn print_fixed[&i](io: &!i Io, x: float) -> [io_write] int {
+    var v = x;
+    if v < 0.0 {
+        say(io, "-");
+        v = 0.0 - v;
+    }
+    let tenths = truncate(v * 10.0 + 0.5);
+    io.print_int(io, tenths / 10);
+    say(io, ".");
+    io.print_int(io, tenths % 10);
+    return 0;
+}
+
+fn clamp_lead(value: float, present: float, most: float) -> [] float {
+    if value > present + most {
+        return present + most;
+    }
+    if value < present - most {
+        return present - most;
+    }
+    return value;
+}
+
+fn other_arm[&f, &d, &o](ffi: &f Ffi("libc"), fds: &d [int], side: int, other: &!o [float]) -> [ffi("libc")] int {
+    let o = 1 - side;
+    if fds[o] < 0 {
+        return 0;
+    }
+    var n = 0;
+    region a {
+        let units = alloc_slice[a](robot.joints(), 0.0);
+        if core.read_arm(ffi, fds[o], o, units) == 0 {
+            var j = 0;
+            while j < robot.gripper() {
+                other[j] = units[j];
+                j = j + 1;
+            }
+            n = robot.gripper();
+        }
+    }
+    return n;
+}
+
+fn now_ms[&f](ffi: &f Ffi("libc")) -> [ffi("libc")] int {
+    return serial.now_us(ffi) / 1000;
+}
+
+// Ask the terminal whether it speaks the kitty keyboard protocol: CSI ? u (its flags, if it does) and then the
+// primary device attributes CSI c, which every terminal answers -- so the answer to the second marks the end of
+// the wait. Answers true when a CSI ? <flags> u came back first.
+fn ask_kitty[&f, &i](ffi: &f Ffi("libc"), io: &!i Io) -> [ffi("libc"), io_write] bool {
+    esc(io, "[?u");
+    esc(io, "[c");
+    var kitty = false;
+    region a {
+        let buf = alloc_slice[a](256, byte_of(0));
+        var n = 0;
+        let start = now_ms(ffi);
+        var answered = false;
+        while !answered && now_ms(ffi) - start < 500 && n < 200 {
+            let k = term.poll(ffi, buf[n..256]);
+            n = n + k;
+            var i = 0;
+            while i + 2 < n {
+                if int_of(buf[i]) == 27 && int_of(buf[i + 1]) == '[' && int_of(buf[i + 2]) == '?' {
+                    var e = i + 3;
+                    while e < n && int_of(buf[e]) >= '0' && int_of(buf[e]) <= '9' {
+                        e = e + 1;
+                    }
+                    if e < n && int_of(buf[e]) == 'u' {
+                        kitty = true;
+                    }
+                    if e < n && int_of(buf[e]) == 'c' {
+                        answered = true;
+                    }
+                    while e < n && int_of(buf[e]) != 'c' && int_of(buf[e]) != 'u' {
+                        e = e + 1;
+                    }
+                    if e < n && int_of(buf[e]) == 'c' {
+                        answered = true;
+                    }
+                }
+                i = i + 1;
+            }
+            if !answered {
+                serial.sleep_us(ffi, 5000);
+            }
+        }
+    }
+    return kitty;
+}
+
+fn status_line[&i, &u](io: &!i Io, side: int, units: &u [float], note: &static [byte]) -> [io_write] int {
+    say(io, "\r");
+    if side == robot.left() {
+        say(io, "left ");
+    } else {
+        say(io, "right");
+    }
+    let names = 6;
+    var j = 0;
+    while j < names {
+        say(io, "  ");
+        print_fixed(io, units[j]);
+        j = j + 1;
+    }
+    say(io, "  ");
+    say(io, note);
+    say(io, "                    ");
+    return 0;
+}
+
+// The loop. Answers the number of key releases measured; `stops` receives their stop times (ms).
+fn drive[&f, &i, &d, &h, &s](ffi: &f Ffi("libc"), io: &!i Io, fds: &d [int], side: int, held: &!h [float], kitty: bool, stops: &!s [int]) -> [ffi("libc"), io_write] int {
+    let fd = fds[side];
+    var measured = 0;
+    region a {
+        let pend = alloc_slice[a](512, byte_of(0));
+        let until = alloc_slice[a](keys.bindings(), -1);
+        let was_held = alloc_slice[a](keys.bindings(), 0);
+        let ev = alloc_slice[a](keys.slots(), 0);
+        let vel = alloc_slice[a](robot.joints(), 0.0);
+        let present = alloc_slice[a](robot.joints(), 0.0);
+        let last = alloc_slice[a](robot.joints(), 0.0);
+        let request = alloc_slice[a](robot.joints(), 0.0);
+        let goals = alloc_slice[a](robot.joints(), 0.0);
+        let other5 = alloc_slice[a](robot.gripper(), 0.0);
+        let joint = alloc_slice[a](1, -1);
+        let stopping = alloc_slice[a](robot.joints(), -1); // when the joint's key went up, until it stops
+        var plen = 0;
+        var slow = false;
+        var quit = false;
+        var note = "";
+        var cycle = 0;
+        while !quit {
+            let t0 = serial.now_us(ffi);
+            let now = t0 / 1000;
+            // Keys: what arrived, appended to what was left of a sequence cut short.
+            if plen < 256 {
+                plen = plen + term.poll(ffi, pend[plen..512]);
+            }
+            var off = 0;
+            var more = true;
+            while more && off < plen {
+                let k = keys.parse(pend[off..plen], kitty, ev);
+                if k == 0 {
+                    more = false;
+                } else {
+                    off = off + k;
+                    if ev[0] == keys.quit() {
+                        quit = true;
+                    } else {
+                        let b = keys.apply(ev, kitty, now, until);
+                        if b >= 0 {
+                            slow = ev[1] & keys.mod_shift() != 0;
+                        }
+                    }
+                }
+            }
+            var c = 0;
+            while off + c < plen {
+                pend[c] = pend[off + c];
+                c = c + 1;
+            }
+            plen = plen - off;
+            // A key that stopped counting as held (released, or its repeats stopped) starts its joint's stop timer.
+            var b = 0;
+            while b < keys.bindings() {
+                let h = keys.held(until, b, now);
+                if was_held[b] == 1 && !h {
+                    stopping[b / 2] = now;
+                }
+                if h {
+                    was_held[b] = 1;
+                    stopping[b / 2] = -1;
+                } else {
+                    was_held[b] = 0;
+                }
+                b = b + 1;
+            }
+            if core.read_arm(ffi, fd, side, present) != 0 {
+                say(io, "\r\nbus error: holding the last goal\r\n");
+                quit = true;
+            } else {
+                // A joint whose key went up has stopped when it moves less than 0.1 between two reads.
+                var j = 0;
+                while j < robot.joints() {
+                    var d = present[j] - last[j];
+                    if d < 0.0 {
+                        d = 0.0 - d;
+                    }
+                    if stopping[j] >= 0 && d < 0.1 && cycle > 0 {
+                        if measured < len(stops) {
+                            stops[measured] = now - stopping[j];
+                            measured = measured + 1;
+                        }
+                        stopping[j] = -1;
+                    }
+                    last[j] = present[j];
+                    j = j + 1;
+                }
+                keys.velocities(until, now, slow, vel);
+                var moving = false;
+                var m = 0;
+                while m < robot.joints() {
+                    var most = core.lead_deg();
+                    if m == robot.gripper() {
+                        most = core.lead_percent();
+                    }
+                    request[m] = clamp_lead(held[m] + vel[m] * 0.02, present[m], most);
+                    if vel[m] != 0.0 {
+                        moving = true;
+                    }
+                    m = m + 1;
+                }
+                if moving {
+                    let n = other_arm(ffi, fds, side, other5);
+                    let rule = core.commit(ffi, fd, side, request, present, held, other5[0..n], 0, 20, goals, joint);
+                    if rule == safety.rule_ok() {
+                        var g = 0;
+                        while g < robot.joints() {
+                            held[g] = goals[g];
+                            g = g + 1;
+                        }
+                        note = "";
+                    } else {
+                        note = core.rule_name(rule);
+                    }
+                }
+                if cycle % 10 == 0 {
+                    status_line(io, side, present, note);
+                }
+            }
+            cycle = cycle + 1;
+            let spent = serial.now_us(ffi) - t0;
+            if spent < 20000 {
+                serial.sleep_us(ffi, 20000 - spent);
+            }
+        }
+    }
+    return measured;
+}
+
+fn report_stops[&i, &s](io: &!i Io, stops: &!s [int], n: int) -> [io_write] int {
+    say(io, "key-up to stop: ");
+    if n == 0 {
+        say(io, "no releases measured\r\n");
+        return 0;
+    }
+    // insertion sort: a few hundred at most
+    var i = 1;
+    while i < n {
+        let x = stops[i];
+        var j = i;
+        while j > 0 && stops[j - 1] > x {
+            stops[j] = stops[j - 1];
+            j = j - 1;
+        }
+        stops[j] = x;
+        i = i + 1;
+    }
+    io.print_int(io, n);
+    say(io, " releases, median ");
+    io.print_int(io, stops[n / 2]);
+    say(io, " ms, worst ");
+    io.print_int(io, stops[n - 1]);
+    say(io, " ms\r\n");
+    return 0;
+}
+
+fn run[&f, &i, &g](ffi: &f Ffi("libc"), io: &!i Io, args: &g Args) -> [ffi("libc"), io_write, args] int {
+    var side = -1;
+    var sim = false;
+    var k = 1;
+    while k < arg_count(args) {
+        let a1 = arg(args, k);
+        if len(a1) == 1 && int_of(a1[0]) == 'l' {
+            side = robot.left();
+        } else if len(a1) == 1 && int_of(a1[0]) == 'r' {
+            side = robot.right();
+        } else if len(a1) == 5 && int_of(a1[2]) == 's' && int_of(a1[3]) == 'i' && int_of(a1[4]) == 'm' {
+            sim = true;
+        } else {
+            side = -2;
+        }
+        k = k + 1;
+    }
+    if side < 0 {
+        say(io, "usage: teleop <l|r> [--sim]\n");
+        return 2;
+    }
+    var status = 0;
+    region a {
+        let fds = alloc_slice[a](2, -1);
+        let opened = alloc_slice[a](robot.devices(), -1);
+        var d = 0;
+        while d < robot.devices() {
+            var path = robot.device(d);
+            if sim {
+                path = robot.sim_device(d);
+            }
+            let fd = serial.open_bus(ffi, path);
+            opened[d] = fd;
+            if fd >= 0 {
+                let s = core.identify(ffi, fd);
+                if s >= 0 && fds[s] < 0 {
+                    fds[s] = fd;
+                }
+            }
+            d = d + 1;
+        }
+        let held = alloc_slice[a](robot.joints(), 0.0);
+        let saved = alloc_slice[a](term.termios_size(), byte_of(0));
+        let stops = alloc_slice[a](512, 0);
+        if fds[side] < 0 {
+            say(io, "no bus carries that arm (its servos match no calibration, or the bus is busy)\n");
+            status = 3;
+        } else if core.hold_and_enable(ffi, fds[side], side, held) != 0 {
+            say(io, "bus error: torque unchanged\n");
+            status = 3;
+        } else if term.enter_raw(ffi, saved) != 0 {
+            say(io, "standard input is not a terminal\n");
+            status = 2;
+        } else {
+            let kitty = ask_kitty(ffi, io);
+            if kitty {
+                esc(io, "[>11u"); // disambiguate, report event types, report all keys as escape codes
+                say(io, "keys: kitty protocol -- keys combine, a release stops at once\r\n");
+            } else {
+                say(io, "keys: plain characters -- one key at a time, released when its repeats stop\r\n");
+            }
+            say(io, "q/a lift  s/w elbow  p/o pan  i/k wrist  l/n roll  space/m grip  shift slow  Esc stop\r\n");
+            let n = drive(ffi, io, fds, side, held, kitty, stops);
+            if kitty {
+                esc(io, "[<u");
+            }
+            term.leave_raw(ffi, saved);
+            say(io, "\r\n");
+            report_stops(io, stops, n);
+            say(io, "torque stays on: the arm holds where it stopped\r\n");
+        }
+        var c = 0;
+        while c < robot.devices() {
+            if opened[c] >= 0 {
+                serial.close_bus(ffi, opened[c]);
+            }
+            c = c + 1;
+        }
+    }
+    return status;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
+    release(net);
+    release(clock);
+    release(fs);
+    release(heap);
+    let libc = narrow(ffi, "libc");
+    var status = 0;
+    borrow libc as &f in {
+        borrow args as &g in {
+            borrow mut io as &!i in {
+                status = run(f, i, g);
+            }
+        }
+    }
+    release(libc);
+    release(args);
+    release(io);
+    return status;
+}

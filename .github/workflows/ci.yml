@@ -171,19 +171,19 @@ jobs:
         run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/safety_driver.ceiling tests/safety_driver.cho src/safety.cho src/kinematics.cho src/so101.cho
       - name: Build the bus scan (task #5; it runs against the robot only, never here)
         working-directory: robot
-        run: ../cancho/target/release/cancho build --std tools/scan.cho src/serial.cho src/feetech.cho -o build/scan
+        run: ../cancho/target/release/cancho build --std tools/scan.cho src/libc.cho src/serial.cho src/feetech.cho -o build/scan
       - name: Scan authority is within its ceiling (libc for the bus, no write builder)
         working-directory: robot
-        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/scan.ceiling tools/scan.cho src/serial.cho src/feetech.cho
+        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/scan.ceiling tools/scan.cho src/libc.cho src/serial.cho src/feetech.cho
       - name: The robot's tables are generated from its calibration files (scripts/gen_robot.py)
         working-directory: robot
         run: python3 scripts/gen_robot.py tests/fixtures/calibration --check src/robot.cho
       - name: Core tests (the lead bound, units, limits, mounts)
         working-directory: robot
-        run: ../cancho/target/release/cancho test tests/core_test.cho src/core.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho --std
+        run: ../cancho/target/release/cancho test tests/core_test.cho src/core.cho src/libc.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho --std
       - name: Build the playground console (task #9)
         working-directory: robot
-        run: ../cancho/target/release/cancho build --std tools/play.cho src/core.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho -o build/play
+        run: ../cancho/target/release/cancho build --std tools/play.cho src/core.cho src/libc.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho -o build/play
       - name: Actuation against the simulated bus, judged from the bus's own trace (task #9, G1-G6)
         working-directory: robot
         run: python3 tests/actuation_gates.py build/play
@@ -195,7 +195,7 @@ jobs:
         run: python3 tests/write_path_check.py --self-test
       - name: Playground authority is within its ceiling
         working-directory: robot
-        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/play.ceiling tools/play.cho src/core.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho
+        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/play.ceiling tools/play.cho src/core.cho src/libc.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho
       - name: The toolbox contract tests (the catalogue, the tags the design names)
         working-directory: robot
         run: ../cancho/target/release/cancho test tests/check_test.cho src/check.cho src/rules.cho src/safety.cho src/ik.cho src/kinematics.cho src/so101.cho --std

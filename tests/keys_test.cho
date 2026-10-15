@@ -1,0 +1,174 @@
+edition 5;
+
+import std.test;
+import keys;
+
+// Task #10's key decoding and key state, without a terminal: the bytes a terminal sends, the layout, which keys are
+// held, the velocities. The terminal and the arm are tests/teleop_gates.py's.
+
+// The bytes of `text` with `^` for Esc (27) and `#` for Ctrl-C (3): a string literal has no escape for either.
+fn ev_of[&t, &e](text: &t [byte], kitty: bool, ev: &!e [int]) -> [] int {
+    var n = 0;
+    region a {
+        let b = alloc_slice[a](len(text), byte_of(0));
+        var i = 0;
+        while i < len(text) {
+            let c = int_of(text[i]);
+            if c == '^' {
+                b[i] = byte_of(27);
+            } else if c == '#' {
+                b[i] = byte_of(3);
+            } else {
+                b[i] = text[i];
+            }
+            i = i + 1;
+        }
+        n = keys.parse(b, kitty, ev);
+    }
+    return n;
+}
+
+fn test_kitty_reports_down_repeat_and_up_with_modifiers() -> [] int {
+    region a {
+        let ev = alloc_slice[a](keys.slots(), 0);
+        // q down: CSI 113 u
+        test.assert_eq(ev_of("^[113u", true, ev), 6);
+        test.assert_eq(ev[0], 'q');
+        test.assert_eq(ev[2], keys.key_down());
+        // q up: CSI 113 ; 1 : 3 u
+        test.assert_eq(ev_of("^[113;1:3u", true, ev), 10);
+        test.assert_eq(ev[0], 'q');
+        test.assert_eq(ev[2], keys.key_up());
+        // shift + q repeating: modifiers 2 (1 + shift), event 2
+        test.assert_eq(ev_of("^[113;2:2u", true, ev), 10);
+        test.assert_eq(ev[1], keys.mod_shift());
+        test.assert_eq(ev[2], keys.key_repeat());
+        // n-tilde is code point 241
+        ev_of("^[241u", true, ev);
+        test.assert_eq(keys.binding(ev[0]), 9);
+        // Esc (CSI 27 u) and Ctrl-C (CSI 99 ; 5 u) quit
+        ev_of("^[27u", true, ev);
+        test.assert_eq(ev[0], keys.quit());
+        ev_of("^[99;5u", true, ev);
+        test.assert_eq(ev[0], keys.quit());
+        // a plain c is not a quit
+        ev_of("^[99u", true, ev);
+        test.assert_eq(ev[0], 'c');
+    }
+    return 0;
+}
+
+fn test_a_sequence_cut_short_waits_and_other_sequences_are_ignored() -> [] int {
+    region a {
+        let ev = alloc_slice[a](keys.slots(), 0);
+        test.assert_eq(ev_of("^[113;1", true, ev), 0); // the rest has not arrived
+        test.assert_eq(ev_of("^", true, ev), 0);
+        // the terminal's answer to the query (CSI ? 11 u) and an arrow are consumed, not taken for keys
+        test.assert_eq(ev_of("^[?11u", true, ev), 6);
+        test.assert_eq(ev[0], keys.ignored());
+        test.assert_eq(ev_of("^[A", false, ev), 3);
+        test.assert_eq(ev[0], keys.ignored());
+    }
+    return 0;
+}
+
+fn test_plain_characters_utf8_and_capitals() -> [] int {
+    region a {
+        let ev = alloc_slice[a](keys.slots(), 0);
+        test.assert_eq(ev_of("q", false, ev), 1);
+        test.assert_eq(ev[0], 'q');
+        test.assert_eq(ev[1], 0);
+        test.assert_eq(ev_of("Q", false, ev), 1);
+        test.assert_eq(ev[0], 'q');
+        test.assert_eq(ev[1], keys.mod_shift());
+        test.assert_eq(ev_of("ñ", false, ev), 2); // n-tilde, UTF-8 C3 B1
+        test.assert_eq(ev[0], 241);
+        test.assert_eq(ev_of("Ñ", false, ev), 2); // its capital, C3 91: shift
+        test.assert_eq(ev[0], 241);
+        test.assert_eq(ev[1], keys.mod_shift());
+        test.assert_eq(ev_of("#", false, ev), 1); // Ctrl-C
+        test.assert_eq(ev[0], keys.quit());
+        test.assert_eq(ev_of("^", false, ev), 1); // a lone Esc, plain mode
+        test.assert_eq(ev[0], keys.quit());
+    }
+    return 0;
+}
+
+fn test_the_layout_is_the_operators() -> [] int {
+    // + then - per joint: pan p/o, lift q/a, elbow s/w, wrist i/k, roll l/n-tilde, grip space/m
+    test.assert_eq(keys.binding('p'), 0);
+    test.assert_eq(keys.binding('o'), 1);
+    test.assert_eq(keys.binding('q'), 2);
+    test.assert_eq(keys.binding('a'), 3);
+    test.assert_eq(keys.binding('s'), 4);
+    test.assert_eq(keys.binding('w'), 5);
+    test.assert_eq(keys.binding('i'), 6);
+    test.assert_eq(keys.binding('k'), 7);
+    test.assert_eq(keys.binding('l'), 8);
+    test.assert_eq(keys.binding(241), 9);
+    test.assert_eq(keys.binding(' '), 10);
+    test.assert_eq(keys.binding('m'), 11);
+    test.assert_eq(keys.binding('z'), -1);
+    return 0;
+}
+
+fn test_kitty_keys_combine_and_stop_on_release() -> [] int {
+    region a {
+        let until = alloc_slice[a](keys.bindings(), -1);
+        let ev = alloc_slice[a](keys.slots(), 0);
+        let v = alloc_slice[a](keys.joints(), 0.0);
+        ev_of("^[113u", true, ev); // q down at 0
+        keys.apply(ev, true, 0, until);
+        ev_of("^[115u", true, ev); // s down at 10
+        keys.apply(ev, true, 10, until);
+        keys.velocities(until, 20, false, v);
+        test.assert(v[1] == 18.0 && v[2] == 21.0); // lift and elbow together
+        ev_of("^[113;1:3u", true, ev); // q up at 30
+        keys.apply(ev, true, 30, until);
+        keys.velocities(until, 31, false, v);
+        test.assert(v[1] == 0.0 && v[2] == 21.0); // lift stops at once, elbow goes on
+        keys.velocities(until, 31, true, v);
+        test.assert(v[2] == 21.0 * keys.fine()); // shift: a quarter
+        // a held key whose repeats stop arriving (a lost connection) stops after the guard
+        keys.velocities(until, 10 + keys.kitty_hold_ms() + 1, false, v);
+        test.assert(v[2] == 0.0);
+    }
+    return 0;
+}
+
+fn test_plain_keys_hold_through_the_initial_delay_then_the_repeats() -> [] int {
+    region a {
+        let until = alloc_slice[a](keys.bindings(), -1);
+        let ev = alloc_slice[a](keys.slots(), 0);
+        let v = alloc_slice[a](keys.joints(), 0.0);
+        ev_of("q", false, ev);
+        keys.apply(ev, false, 0, until);
+        keys.velocities(until, keys.first_hold_ms() - 1, false, v);
+        test.assert(v[1] == 18.0); // still held before the OS starts repeating
+        keys.apply(ev, false, 400, until); // the first repeat
+        keys.velocities(until, 400 + keys.repeat_hold_ms() + 1, false, v);
+        test.assert(v[1] == 0.0); // repeats stopped: released
+        // another key replaces the one held (the terminal repeats only the last key)
+        keys.apply(ev, false, 1000, until);
+        ev_of("s", false, ev);
+        keys.apply(ev, false, 1010, until);
+        keys.velocities(until, 1020, false, v);
+        test.assert(v[1] == 0.0 && v[2] == 21.0);
+    }
+    return 0;
+}
+
+fn test_plus_and_minus_of_one_joint_cancel() -> [] int {
+    region a {
+        let until = alloc_slice[a](keys.bindings(), -1);
+        let ev = alloc_slice[a](keys.slots(), 0);
+        let v = alloc_slice[a](keys.joints(), 0.0);
+        ev_of("^[112u", true, ev);
+        keys.apply(ev, true, 0, until);
+        ev_of("^[111u", true, ev);
+        keys.apply(ev, true, 0, until);
+        keys.velocities(until, 1, false, v);
+        test.assert(v[0] == 0.0);
+    }
+    return 0;
+}

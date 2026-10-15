@@ -47,7 +47,7 @@ the same Feetech protocol from the robot's own calibration and rest positions (`
 apart, and the simulated bus logs every byte that reaches a servo).
 
 ```sh
-cancho build --std tools/play.cho src/core.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho \
+cancho build --std tools/play.cho src/core.cho src/libc.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho \
   src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho -o build/play
 python3 sim/fake_bus.py --trace /tmp/bus.jsonl &       # add --crossed, or --obstacle right:3:2900, to try those
 build/play --sim
