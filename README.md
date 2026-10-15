@@ -47,7 +47,7 @@ the same Feetech protocol from the robot's own calibration and rest positions (`
 apart, and the simulated bus logs every byte that reaches a servo).
 
 ```sh
-cancho build --std tools/play.cho src/core.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho \
+cancho build --std tools/play.cho src/core.cho src/libc.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho \
   src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho -o build/play
 python3 sim/fake_bus.py --trace /tmp/bus.jsonl &       # add --crossed, or --obstacle right:3:2900, to try those
 build/play --sim
@@ -58,6 +58,18 @@ build/play --sim
 ```
 
 Without `--sim` it opens the robot's two buses on the Raspberry Pi. That moves real arms: an operator at the e-stop, every time.
+
+### Keyboard teleoperation
+
+`tools/teleop` drives one arm from the keyboard at 50 Hz, every step through the safety core, with the operator's
+layout: `q/a` shoulder, `s/w` elbow, `p/o` base, `i/k` wrist, `l/ñ` roll, `space/m` gripper, shift for a quarter of
+the speed, Esc to stop. In a terminal that speaks the kitty keyboard protocol (kitty, Ghostty, WezTerm, foot, recent
+iTerm2) keys combine and a release stops the joint at once; elsewhere it is one key at a time, released when the
+key's repeats stop. On the way out it prints the time from each key release to the joint stopping.
+
+```sh
+build/teleop l --sim     # or r; without --sim it drives the robot
+```
 
 ## Project page
 

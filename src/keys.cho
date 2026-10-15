@@ -1,0 +1,319 @@
+edition 5;
+
+module keys;
+
+// `keys` -- task #10: from the bytes a terminal sends to which joints should move, how fast. Pure: no terminal, no
+// bus, no clock (the caller passes the time). `term` reads the bytes; `tools/teleop` drives the arm with the answer.
+//
+// A terminal sends characters, not keys going down and up, and its auto-repeat repeats only the last key held, so
+// two keys at once cannot be seen. Two ways in, both decoded here:
+//
+//   * the kitty keyboard protocol (kitty, Ghostty, WezTerm, foot, recent iTerm2): asked for with progressive
+//     enhancement flags 1|2|8, the terminal reports every key as `ESC [ code ; modifiers : event u`, with event 1
+//     press, 2 repeat, 3 RELEASE. Keys combine, and a release stops a joint the moment it arrives;
+//   * plain characters, everywhere else: a key counts as held while its characters keep arriving (the first repeat
+//     comes after the OS's initial delay, the next ones every few tens of milliseconds), so one key at a time, and
+//     a release is noticed only when the repeats stop.
+//
+// The layout is the operator's (lex-robot PR #215, 2026-10-06), joints 0..5 = pan, lift, elbow, wrist, roll, grip:
+//
+//     q / a  lift + / -      s / w  elbow + / -      p / o  pan + / -
+//     i / k  wrist + / -     l / n-tilde  roll + / - space / m  grip open / close      shift: a quarter of the speed
+
+// ── events ───────────────────────────────────────────────────────────────────────────────────────────────
+
+pub fn key_down() -> [] int {
+    return 1;
+}
+
+pub fn key_repeat() -> [] int {
+    return 2;
+}
+
+pub fn key_up() -> [] int {
+    return 3;
+}
+
+// Codes that are not characters: the controller's own meanings for them.
+pub fn quit() -> [] int {
+    return -1;
+} // Esc, or Ctrl-C
+
+pub fn ignored() -> [] int {
+    return -2;
+} // a sequence this program does not use (arrows, the terminal's answers to queries)
+
+pub fn mod_shift() -> [] int {
+    return 1;
+}
+
+pub fn mod_ctrl() -> [] int {
+    return 4;
+}
+
+// The event table `parse` fills: [0] the key's code (a Unicode code point, lower case), or quit()/ignored();
+// [1] the modifiers (mod_shift, mod_ctrl bits); [2] the event (key_down, key_repeat, key_up).
+pub fn slots() -> [] int {
+    return 3;
+}
+
+fn is_digit(c: int) -> [] bool {
+    return c >= '0' && c <= '9';
+}
+
+// A decimal number at buf[at..], into out[0]; answers where it ends.
+fn digits[&b, &o](buf: &b [byte], at: int, out: &!o [int]) -> [] int {
+    var i = at;
+    var v = 0;
+    while i < len(buf) && is_digit(int_of(buf[i])) {
+        v = v * 10 + int_of(buf[i]) - '0';
+        i = i + 1;
+    }
+    out[0] = v;
+    return i;
+}
+
+// One key from the start of `buf`. Answers how many bytes it took (the event in `ev`), or 0 when `buf` ends inside
+// a sequence (wait for more). `kitty` says whether the terminal speaks the protocol; an escape sequence is always
+// read as one either way, so a reply to a query is never taken for keys.
+pub fn parse[&b, &e](buf: &b [byte], kitty: bool, ev: &!e [int]) -> [] int {
+    let n = len(buf);
+    if n == 0 {
+        return 0;
+    }
+    ev[0] = ignored();
+    ev[1] = 0;
+    ev[2] = key_down();
+    let c = int_of(buf[0]);
+    if c == 27 {
+        if n == 1 {
+            // A lone Esc: in the kitty protocol Esc arrives as CSI 27u, so a lone byte is the plain key.
+            if kitty {
+                return 0;
+            }
+            ev[0] = quit();
+            return 1;
+        }
+        if int_of(buf[1]) != '[' {
+            ev[0] = quit();
+            return 1;
+        }
+        // CSI: parameters up to a final byte in 0x40..0x7E.
+        var end = 2;
+        while end < n && (int_of(buf[end]) < 64 || int_of(buf[end]) > 126) {
+            end = end + 1;
+        }
+        if end >= n {
+            return 0;
+        }
+        if int_of(buf[end]) != 'u' || !is_digit(int_of(buf[2])) {
+            return end + 1; // not a key report (an arrow in legacy form, the answer to a query): ignored
+        }
+        var code = 0;
+        var mods = 1;
+        var event = key_down();
+        region a {
+            let num = alloc_slice[a](1, 0);
+            var i = digits(buf, 2, num);
+            code = num[0];
+            while i < end && int_of(buf[i]) == ':' {
+                i = digits(buf, i + 1, num); // alternate key codes: not asked for, skipped
+            }
+            if i < end && int_of(buf[i]) == ';' {
+                i = digits(buf, i + 1, num);
+                mods = num[0];
+                if i < end && int_of(buf[i]) == ':' {
+                    i = digits(buf, i + 1, num);
+                    event = num[0];
+                }
+            }
+        }
+        let bits = mods - 1;
+        ev[1] = bits;
+        ev[2] = event;
+        if code == 27 || code == 'c' && bits & mod_ctrl() != 0 {
+            ev[0] = quit();
+        } else {
+            ev[0] = code;
+        }
+        return end + 1;
+    }
+    if c == 3 {
+        ev[0] = quit();
+        return 1;
+    }
+    // A plain character: UTF-8 for n-tilde (C3 B1) and its capital (C3 91); a capital letter is the letter with shift.
+    if c == 195 {
+        if n < 2 {
+            return 0;
+        }
+        let d = int_of(buf[1]);
+        if d == 177 {
+            ev[0] = 241;
+        } else if d == 145 {
+            ev[0] = 241;
+            ev[1] = mod_shift();
+        }
+        return 2;
+    }
+    if c >= 'A' && c <= 'Z' {
+        ev[0] = c + 32;
+        ev[1] = mod_shift();
+        return 1;
+    }
+    if c >= 128 {
+        return 1; // another multi-byte character's byte: not a key this program uses
+    }
+    ev[0] = c;
+    return 1;
+}
+
+// ── the layout ───────────────────────────────────────────────────────────────────────────────────────────
+
+pub fn bindings() -> [] int {
+    return 12;
+}
+
+pub fn joints() -> [] int {
+    return 6;
+}
+
+// Which binding a key is: joint * 2 for the + key, joint * 2 + 1 for the - key, or -1 for a key the layout does not
+// use. Joints: 0 pan, 1 lift, 2 elbow, 3 wrist, 4 roll, 5 grip.
+pub fn binding(code: int) -> [] int {
+    if code == 'p' {
+        return 0;
+    }
+    if code == 'o' {
+        return 1;
+    } // swapped after trying it on the left arm (lex-robot, 2026-10-06)
+    if code == 'q' {
+        return 2;
+    }
+    if code == 'a' {
+        return 3;
+    }
+    if code == 's' {
+        return 4;
+    }
+    if code == 'w' {
+        return 5;
+    }
+    if code == 'i' {
+        return 6;
+    }
+    if code == 'k' {
+        return 7;
+    }
+    if code == 'l' {
+        return 8;
+    }
+    if code == 241 {
+        return 9;
+    } // n-tilde
+    if code == ' ' {
+        return 10;
+    }
+    if code == 'm' {
+        return 11;
+    }
+    return -1;
+}
+
+// Degrees per second for each joint (the gripper: percent per second): lex-robot's per-frame steps at 30 frames a
+// second, so the keys feel as they did there.
+pub fn speed(joint: int) -> [] float {
+    if joint == 0 {
+        return 21.0;
+    }
+    if joint == 1 {
+        return 18.0;
+    }
+    if joint == 2 {
+        return 21.0;
+    }
+    if joint == 3 {
+        return 27.0;
+    }
+    if joint == 4 {
+        return 36.0;
+    }
+    return 45.0;
+}
+
+pub fn fine() -> [] float {
+    return 0.25;
+}
+
+// ── which keys are held ──────────────────────────────────────────────────────────────────────────────────
+// `until[b]` is the time (ms) binding b stops counting as held, or -1. In the kitty protocol a press or a repeat
+// holds it for `kitty_hold_ms` -- not a release detector (the release event is), but the guard for a connection
+// that stops carrying events while a key is down: the OS repeats a held key every few tens of milliseconds after
+// its initial delay, so a held key that goes quiet for a second is a lost connection, and the arm stops. With plain
+// characters the first one holds for the initial delay and each repeat for a little more than the repeat interval.
+
+pub fn kitty_hold_ms() -> [] int {
+    return 1000;
+}
+
+pub fn first_hold_ms() -> [] int {
+    return 600;
+}
+
+pub fn repeat_hold_ms() -> [] int {
+    return 150;
+}
+
+// Apply one event at time `now`. Answers the binding it touched, or -1.
+pub fn apply[&e, &u](ev: &e [int], kitty: bool, now: int, until: &!u [int]) -> [] int {
+    let b = binding(ev[0]);
+    if b < 0 {
+        return -1;
+    }
+    if kitty {
+        if ev[2] == key_up() {
+            until[b] = -1;
+        } else {
+            until[b] = now + kitty_hold_ms();
+        }
+        return b;
+    }
+    // Plain characters: a different key replaces the one held (the terminal repeats only the last key anyway).
+    var k = 0;
+    while k < bindings() {
+        if k != b {
+            until[k] = -1;
+        }
+        k = k + 1;
+    }
+    if until[b] < now {
+        until[b] = now + first_hold_ms();
+    } else {
+        until[b] = now + repeat_hold_ms();
+    }
+    return b;
+}
+
+pub fn held[&u](until: &u [int], b: int, now: int) -> [] bool {
+    return until[b] >= now;
+}
+
+// The velocity of each joint, from the keys held at `now`: + and - of one joint cancel; `slow` is shift.
+pub fn velocities[&u, &v](until: &u [int], now: int, slow: bool, out: &!v [float]) -> [] int {
+    var j = 0;
+    while j < joints() {
+        var v = 0.0;
+        if held(until, j * 2, now) {
+            v = v + speed(j);
+        }
+        if held(until, j * 2 + 1, now) {
+            v = v - speed(j);
+        }
+        if slow {
+            v = v * fine();
+        }
+        out[j] = v;
+        j = j + 1;
+    }
+    return 0;
+}

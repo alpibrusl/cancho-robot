@@ -7,7 +7,8 @@ that writes goals. The write path is kept narrow by construction, and this gate 
   - `feetech_write` (the only builder of WRITE / SYNC WRITE packets) is imported only by `serial_write`;
   - `serial_write` is imported, and its functions called, only by `core`;
   - `serial.send` (bytes out with no reply expected) is called only by `serial_write`;
-  - `tools/scan.cho` imports neither `core` nor `serial_write`.
+  - `tools/scan.cho` imports neither `core` nor `serial_write`;
+  - `libc` (every foreign declaration) is imported only by `serial` (the bus) and `term` (the terminal).
 
 Test drivers and tests (tests/) are exempt: they are not part of a program that runs against the robot. This is a
 call-site check, weaker than the compiler's proof (design section 3 says so); `--self-test` shows it can fail by
@@ -24,6 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 RULES = [
+    (re.compile(r"^\s*import\s+libc\s*;", re.M), {"src/serial.cho", "src/term.cho"}, "imports libc (foreign calls)"),
     (re.compile(r"^\s*import\s+feetech_write\s*;", re.M), {"src/serial_write.cho"}, "imports feetech_write"),
     (re.compile(r"^\s*import\s+serial_write\s*;", re.M), {"src/core.cho"}, "imports serial_write"),
     (re.compile(r"\bserial_write\.\w+\s*\("), {"src/core.cho"}, "calls serial_write"),

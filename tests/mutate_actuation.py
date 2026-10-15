@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCES = ["tools/play.cho", "src/core.cho", "src/serial.cho", "src/serial_write.cho", "src/feetech.cho",
+SOURCES = ["tools/play.cho", "src/core.cho", "src/libc.cho", "src/serial.cho", "src/serial_write.cho", "src/feetech.cho",
            "src/feetech_write.cho", "src/calibration.cho", "src/robot.cho", "src/safety.cho", "src/kinematics.cho",
            "src/so101.cho"]
 

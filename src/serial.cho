@@ -3,12 +3,13 @@ edition 5;
 module serial;
 
 import feetech;
+import libc;
 
 // `serial` -- the servo bus as a file descriptor: open it raw at 1,000,000 baud, send one packet, collect one
 // status packet. Linux only (the controller is the Raspberry Pi 5, docs/decisions.md); the darwin variant is the
 // spike's (spikes/ping/ping.cho: the speed needs the variadic IOSSIOSPEED ioctl there).
 //
-// **Every foreign call of the controller is in this module** (docs/design.md section 3): `cancho authority`
+// **Every foreign call to the bus is made here** (docs/design.md section 3); the declarations are `libc`'s: `cancho authority`
 // reports them symbol by symbol, and a gate pins the list. Nothing here builds a packet; it moves the bytes the
 // codec built, so whether a program can write to a servo is decided by whether it imports `feetech_write`, not
 // by this module.
@@ -18,28 +19,6 @@ import feetech;
 // (fd, buffer, count) exactly; `cfsetspeed` would take the length as the speed, so the speed is written into the
 // termios bytes; `free` cannot be declared (the runtime declares it), so the one copy of the path is not freed.
 // The termios layout is glibc 2.41 aarch64's, measured by spikes/ping/abi_linux.c.
-
-extern fn strdup[&f, &s](ffi: &f Ffi("libc"), s: &s [byte]) -> [ffi("libc")] c_ptr;
-
-extern fn open[&f](ffi: &f Ffi("libc"), path: c_ptr, flags: int) -> [ffi("libc")] c_int;
-
-extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] c_int;
-
-extern fn tcgetattr[&f, &b](ffi: &f Ffi("libc"), fd: int, t: &!b [byte]) -> [ffi("libc")] c_int;
-
-extern fn tcsetattr[&f, &b](ffi: &f Ffi("libc"), fd: int, action: int, t: &b [byte]) -> [ffi("libc")] c_int;
-
-extern fn cfmakeraw[&f, &b](ffi: &f Ffi("libc"), t: &!b [byte]) -> [ffi("libc")] int;
-
-extern fn tcflush[&f](ffi: &f Ffi("libc"), fd: int, queue: int) -> [ffi("libc")] c_int;
-
-extern fn read[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &!b [byte]) -> [ffi("libc")] int;
-
-extern fn write[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &b [byte]) -> [ffi("libc")] int;
-
-extern fn clock_gettime[&f, &b](ffi: &f Ffi("libc"), clock: int, ts: &!b [byte]) -> [ffi("libc")] c_int;
-
-extern fn usleep[&f](ffi: &f Ffi("libc"), us: int) -> [ffi("libc")] c_int;
 
 // ── glibc 2.41, aarch64 (spikes/ping/abi_linux.c) ────────────────────────────────────────────────────────────
 
@@ -176,7 +155,7 @@ pub fn now_us[&f](ffi: &f Ffi("libc")) -> [ffi("libc")] int {
     var us = 0;
     region a {
         let ts = alloc_slice[a](16, byte_of(0));
-        clock_gettime(ffi, clock_monotonic(), ts);
+        libc.clock_gettime(ffi, clock_monotonic(), ts);
         us = get_le(ts, 0, 8) * 1000000 + get_le(ts, 8, 8) / 1000;
     }
     return us;
@@ -184,7 +163,7 @@ pub fn now_us[&f](ffi: &f Ffi("libc")) -> [ffi("libc")] int {
 
 // Sleep for `us` microseconds: the console's pacing between steps, never inside a transaction.
 pub fn sleep_us[&f](ffi: &f Ffi("libc"), us: int) -> [ffi("libc")] int {
-    usleep(ffi, us);
+    libc.usleep(ffi, us);
     return 0;
 }
 
@@ -197,17 +176,17 @@ pub fn open_bus[&f, &p](ffi: &f Ffi("libc"), path: &p [byte]) -> [ffi("libc")] i
     if n < 2 || int_of(path[n - 1]) != 0 {
         return error_open();
     }
-    let fd = open(ffi, strdup(ffi, path), o_rdwr() + o_noctty() + o_nonblock());
+    let fd = libc.open(ffi, libc.strdup(ffi, path), o_rdwr() + o_noctty() + o_nonblock());
     if fd < 0 {
         return error_open();
     }
     var ok = true;
     region a {
         let t = alloc_slice[a](termios_size(), byte_of(0));
-        if tcgetattr(ffi, fd, t) != 0 {
+        if libc.tcgetattr(ffi, fd, t) != 0 {
             ok = false;
         } else {
-            cfmakeraw(ffi, t);
+            libc.cfmakeraw(ffi, t);
             let cf = get_le(t, cflag_at(), 4);
             put_le(t, cflag_at(), 4, cf & ~cbaud_mask() | b1000000() | clocal() | cread());
             t[cc_at() + vmin()] = byte_of(0);
@@ -215,12 +194,12 @@ pub fn open_bus[&f, &p](ffi: &f Ffi("libc"), path: &p [byte]) -> [ffi("libc")] i
             // glibc 2.41 keeps the B-constant in these two fields too (measured: 4104 after cfsetspeed).
             put_le(t, ispeed_at(), 4, b1000000());
             put_le(t, ospeed_at(), 4, b1000000());
-            if tcsetattr(ffi, fd, 0, t) != 0 {
+            if libc.tcsetattr(ffi, fd, 0, t) != 0 {
                 ok = false;
             } else {
                 // Read back what the driver kept: the speed bits must be B1000000, or the bus is silent.
                 let back = alloc_slice[a](termios_size(), byte_of(0));
-                tcgetattr(ffi, fd, back);
+                libc.tcgetattr(ffi, fd, back);
                 if get_le(back, cflag_at(), 4) & cbaud_mask() != b1000000() {
                     ok = false;
                 }
@@ -228,14 +207,14 @@ pub fn open_bus[&f, &p](ffi: &f Ffi("libc"), path: &p [byte]) -> [ffi("libc")] i
         }
     }
     if !ok {
-        close(ffi, fd);
+        libc.close(ffi, fd);
         return error_open();
     }
     return fd;
 }
 
 pub fn close_bus[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] int {
-    return close(ffi, fd);
+    return libc.close(ffi, fd);
 }
 
 // Send `pkt[0..n]` and collect the status packet from `expected_id` into `reply`, for up to `timeout_us`.
@@ -244,8 +223,8 @@ pub fn close_bus[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] int {
 // codec error), or one of this module's errors. Polls without sleeping: a reply takes a third of a millisecond,
 // and the finest sleep would cost more than the wait.
 pub fn transact[&f, &p, &r, &t](ffi: &f Ffi("libc"), fd: int, pkt: &p [byte], n: int, reply: &!r [byte], expected_id: int, table: &!t [int], timeout_us: int) -> [ffi("libc")] int {
-    tcflush(ffi, fd, tciflush());
-    if write(ffi, fd, pkt[0..n]) != n {
+    libc.tcflush(ffi, fd, tciflush());
+    if libc.write(ffi, fd, pkt[0..n]) != n {
         return error_write();
     }
     let start = now_us(ffi);
@@ -254,7 +233,7 @@ pub fn transact[&f, &p, &r, &t](ffi: &f Ffi("libc"), fd: int, pkt: &p [byte], n:
         if got >= len(reply) {
             return error_overflow();
         }
-        let k = read(ffi, fd, reply[got..len(reply)]);
+        let k = libc.read(ffi, fd, reply[got..len(reply)]);
         if k > 0 {
             got = got + k;
             let r = feetech.decode(reply[0..got], expected_id, table);
@@ -273,7 +252,7 @@ pub fn transact[&f, &p, &r, &t](ffi: &f Ffi("libc"), fd: int, pkt: &p [byte], n:
 // the bytes are is decided by whoever built them; the only builders of write instructions are in
 // `feetech_write`, and the only caller of this is `serial_write` (gate A3).
 pub fn send[&f, &p](ffi: &f Ffi("libc"), fd: int, pkt: &p [byte], n: int) -> [ffi("libc")] int {
-    if write(ffi, fd, pkt[0..n]) != n {
+    if libc.write(ffi, fd, pkt[0..n]) != n {
         return error_write();
     }
     return n;

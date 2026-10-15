@@ -82,3 +82,22 @@ section 13 item 5 (a threaded bus reader), not a real-time claim.
 
 *History: written with task #15; the reasons summarise the design doc's own sections 2, 5, 6 and 7, they do
 not add new ones. A decision that changes is a new commit on this file, with its date and its reason.*
+
+## The terminal is the second module with foreign calls; every declaration lives in `libc`
+
+**Decision** (the maintainer, 2026-10-15, task #10): keyboard teleoperation reads keys as they go down and up, which
+needs the terminal in raw mode and non-blocking reads of standard input: `tcgetattr`, `tcsetattr`, `cfmakeraw` and
+`read` on descriptor 0. Those calls live in `src/term.cho`, a second module beside `serial`, and every foreign
+declaration of the controller lives in `src/libc.cho`, imported by those two modules only (gate A3,
+`tests/write_path_check.py`). Each program's ceiling pins the symbols it reaches (`authority/teleop.ceiling`).
+
+**Reason:** cancho binds a foreign symbol once per program ("a symbol is one function to the linker"), so `serial`
+and `term` cannot each declare `tcgetattr`; one module of declarations is what the language allows, and it puts the
+whole foreign surface in one file. The alternatives were weaker or slower: a separate key-reading process moves the
+keys onto a socket and adds a boundary to prove; a `std` primitive for raw terminals is cancho's to design.
+
+**Cost:** the compiler cannot tell `term`'s `read` on descriptor 0 from `serial`'s on the bus: both are `read` under
+`ffi("libc")`. That `term` touches only descriptor 0 is a property of its source, checked in review and by its
+tests, not proven -- the same gap as which device `serial` opens (cancho#387).
+
+**Revisit when:** cancho gains a terminal capability or per-device foreign authority.

@@ -1,0 +1,18 @@
+# tools/teleop.cho, keyboard teleoperation through core: the command line, the console out, and libc for the bus
+# (serial), the terminal (term: raw mode and non-blocking reads of standard input), the clock and the pacing sleep.
+# Standard input is read through libc's read on descriptor 0, so there is no io_read label: the keys are a foreign
+# call, as the bus is (docs/decisions.md). No network, no filesystem, no exec.
+args
+ffi("libc")
+io_write
+foreign cfmakeraw
+foreign clock_gettime
+foreign close
+foreign open
+foreign read
+foreign strdup
+foreign tcflush
+foreign tcgetattr
+foreign tcsetattr
+foreign usleep
+foreign write

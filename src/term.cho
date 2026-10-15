@@ -1,0 +1,74 @@
+edition 5;
+
+module term;
+
+import libc;
+
+// `term` -- task #10: the operator's terminal, raw, read without waiting. The second module allowed foreign calls
+// (docs/decisions.md): `serial` holds the bus's, this one the terminal's, and neither reaches the other's device.
+// It touches descriptor 0 (standard input) only: put it in raw mode so each key arrives as it is pressed (no line
+// editing, no echo, and Ctrl-C as a byte, not a signal, so the program restores the terminal and holds the arm
+// itself), read what has arrived without blocking, and put it back as it was. Writing to the terminal is `std.io`'s.
+//
+// Linux, glibc 2.41: the termios layout of spikes/ping/abi_linux.c (60 bytes, c_cc at 17, VMIN 6, VTIME 5).
+
+fn stdin() -> [] int {
+    return 0;
+}
+
+pub fn termios_size() -> [] int {
+    return 60;
+}
+
+fn cc_at() -> [] int {
+    return 17;
+}
+
+fn vmin() -> [] int {
+    return 6;
+}
+
+fn vtime() -> [] int {
+    return 5;
+}
+
+fn tcsanow() -> [] int {
+    return 0;
+}
+
+// Raw mode, reads that return at once. `saved` (termios_size() bytes) receives the terminal's settings, for
+// `leave_raw`. Answers 0, or -1 when standard input is not a terminal (nothing is changed then).
+pub fn enter_raw[&f, &s](ffi: &f Ffi("libc"), saved: &!s [byte]) -> [ffi("libc")] int {
+    if libc.tcgetattr(ffi, stdin(), saved) != 0 {
+        return -1;
+    }
+    var status = 0;
+    region a {
+        let t = alloc_slice[a](termios_size(), byte_of(0));
+        var i = 0;
+        while i < termios_size() {
+            t[i] = saved[i];
+            i = i + 1;
+        }
+        libc.cfmakeraw(ffi, t);
+        t[cc_at() + vmin()] = byte_of(0);
+        t[cc_at() + vtime()] = byte_of(0);
+        if libc.tcsetattr(ffi, stdin(), tcsanow(), t) != 0 {
+            status = -1;
+        }
+    }
+    return status;
+}
+
+pub fn leave_raw[&f, &s](ffi: &f Ffi("libc"), saved: &s [byte]) -> [ffi("libc")] int {
+    return libc.tcsetattr(ffi, stdin(), tcsanow(), saved);
+}
+
+// What has arrived on the terminal since the last call, into `buf`: answers how many bytes (0 when nothing has).
+pub fn poll[&f, &b](ffi: &f Ffi("libc"), buf: &!b [byte]) -> [ffi("libc")] int {
+    let n = libc.read(ffi, stdin(), buf);
+    if n < 0 {
+        return 0;
+    }
+    return n;
+}

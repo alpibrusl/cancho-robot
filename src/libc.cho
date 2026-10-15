@@ -1,0 +1,33 @@
+edition 5;
+
+module libc;
+
+// `libc` -- every C function the controller declares, in one place. A foreign symbol binds once per program (cancho
+// refuses a second `extern fn tcgetattr`: "a symbol is one function to the linker"), so the bus (`serial`) and the
+// terminal (`term`) cannot each declare their own: they share these. Only those two modules import this one
+// (tests/write_path_check.py), and `cancho authority` lists, per program, the symbols it actually reaches.
+//
+// A `&[byte]` crosses to C as a pointer AND a length, so a C argument list is matched by position with that in
+// mind (read/write: fd, buffer, count). `free` cannot be declared (the runtime declares it), and `ioctl` is variadic
+// (darwin's IOSSIOSPEED needs padding; Linux, the controller, needs no ioctl at all).
+extern fn strdup[&f, &s](ffi: &f Ffi("libc"), s: &s [byte]) -> [ffi("libc")] c_ptr;
+
+extern fn open[&f](ffi: &f Ffi("libc"), path: c_ptr, flags: int) -> [ffi("libc")] c_int;
+
+extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] c_int;
+
+extern fn tcgetattr[&f, &b](ffi: &f Ffi("libc"), fd: int, t: &!b [byte]) -> [ffi("libc")] c_int;
+
+extern fn tcsetattr[&f, &b](ffi: &f Ffi("libc"), fd: int, action: int, t: &b [byte]) -> [ffi("libc")] c_int;
+
+extern fn cfmakeraw[&f, &b](ffi: &f Ffi("libc"), t: &!b [byte]) -> [ffi("libc")] int;
+
+extern fn tcflush[&f](ffi: &f Ffi("libc"), fd: int, queue: int) -> [ffi("libc")] c_int;
+
+extern fn read[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &!b [byte]) -> [ffi("libc")] int;
+
+extern fn write[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &b [byte]) -> [ffi("libc")] int;
+
+extern fn clock_gettime[&f, &b](ffi: &f Ffi("libc"), clock: int, ts: &!b [byte]) -> [ffi("libc")] c_int;
+
+extern fn usleep[&f](ffi: &f Ffi("libc"), us: int) -> [ffi("libc")] c_int;
