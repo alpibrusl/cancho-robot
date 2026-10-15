@@ -31,6 +31,18 @@ fn esc[&i, &t](io: &!i Io, rest: &t [byte]) -> [io_write] int {
     return io.write_all(io, rest);
 }
 
+// Standard output is buffered: a question to the terminal, or a status line, reaches it only when flushed.
+fn flush[&i](io: &!i Io) -> [io_write] int {
+    match flush_out(io) {
+        Done::Ok(_) => {
+            return 0;
+        }
+        Done::Failed(e) => {
+            return e;
+        }
+    }
+}
+
 fn print_fixed[&i](io: &!i Io, x: float) -> [io_write] int {
     var v = x;
     if v < 0.0 {
@@ -84,6 +96,7 @@ fn now_ms[&f](ffi: &f Ffi("libc")) -> [ffi("libc")] int {
 fn ask_kitty[&f, &i](ffi: &f Ffi("libc"), io: &!i Io) -> [ffi("libc"), io_write] bool {
     esc(io, "[?u");
     esc(io, "[c");
+    flush(io);
     var kitty = false;
     region a {
         let buf = alloc_slice[a](256, byte_of(0));
@@ -140,6 +153,7 @@ fn status_line[&i, &u](io: &!i Io, side: int, units: &u [float], note: &static [
     say(io, "  ");
     say(io, note);
     say(io, "                    ");
+    flush(io);
     return 0;
 }
 
@@ -363,9 +377,11 @@ fn run[&f, &i, &g](ffi: &f Ffi("libc"), io: &!i Io, args: &g Args) -> [ffi("libc
                 say(io, "keys: plain characters -- one key at a time, released when its repeats stop\r\n");
             }
             say(io, "q/a lift  s/w elbow  p/o pan  i/k wrist  l/n roll  space/m grip  shift slow  Esc stop\r\n");
+            flush(io);
             let n = drive(ffi, io, fds, side, held, kitty, stops);
             if kitty {
                 esc(io, "[<u");
+                flush(io);
             }
             term.leave_raw(ffi, saved);
             say(io, "\r\n");
