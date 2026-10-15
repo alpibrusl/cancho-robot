@@ -238,3 +238,36 @@ trace; `tests/mutate_actuation.py` breaks each.
 **Not yet.** Nothing has moved on the robot. The hardware gate of #9 (one joint first, small steps, the operator
 at the e-stop, tracking against LeRobot driving the same sequence) is next, and the geometry of design section 12
 is still estimates: the tower contact at rest says so.
+
+## 2026-10-15 · #10 · Keyboard teleoperation from a terminal, on a pseudo-terminal first
+
+**Asked.** Can the operator's keys drive an arm at 50 Hz through the safety core, joint by joint, keys combining,
+with no backlog after a release -- over SSH to the Pi, where there is no OS keyboard API, only a terminal?
+
+**Setup.** cancho `7bf3628`. `src/keys.cho` (pure: decode, layout, held keys, velocities), `src/term.cho` (raw
+mode and non-blocking reads of standard input), `src/libc.cho` (every foreign declaration), `tools/teleop.cho`.
+`tests/teleop_gates.py` runs teleop on a pseudo-terminal, plays the terminal (answering the protocol question or
+not) and sends keys with real timing; the simulated bus's trace says what reached the servos, on the same clock.
+
+**What came out.**
+
+1. **A terminal sends characters, not keys.** No key-up, and auto-repeat repeats only the last key held, so keys
+   cannot combine (the web version's complaint, lex-robot #215). The kitty keyboard protocol fixes both: asked for
+   with flags 1|2|8, the terminal reports press, repeat and RELEASE for every key. teleop asks (CSI ? u, then CSI c,
+   which every terminal answers) and falls back to plain characters, where a key is held while its repeats arrive.
+2. **cancho binds a foreign symbol once per program**, so the terminal's module could not declare `tcgetattr`
+   beside the bus's. Every declaration moved to `src/libc.cho`; `serial` and `term` are its only importers
+   (decision record, gate A3).
+3. **The question to the terminal sat in the stdout buffer** until the 500 ms wait was over, so the first run never
+   saw the protocol and fell back to plain keys. `flush_out` after the question and each status line.
+4. **A request is refused as a whole when one joint reaches its span**, so with the elbow at the top of its span the
+   shoulder stopped too. teleop asks again with that joint held where it is -- a second request through the same
+   commit.
+5. **Gates:** T1 a held key moves its joint the right way; T2 no change after a release (kitty); T3 two keys move two
+   joints in the same cycles; T4 a connection gone quiet with a key down stops the arm after 1 s; T5 plain keys stop
+   114 ms after their repeats stop; T6 the terminal restored, torque left on; T7 one joint at its span does not stop
+   the others. Key-up to stop on the simulated bus: median 20 ms (one cycle). 7 of 7 mutants caught (one first
+   survived: the guard's unit test read the constant it was testing, and T4 used a joint that reached its span
+   before the guard expired).
+
+**Not yet.** The robot: key-up to stop on real servos, and whether the operator's terminal speaks the protocol.

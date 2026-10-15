@@ -196,6 +196,21 @@ jobs:
       - name: Playground authority is within its ceiling
         working-directory: robot
         run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/play.ceiling tools/play.cho src/core.cho src/libc.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho
+      - name: Key decoding and key state (task #10; both protocols, the layout, the guards)
+        working-directory: robot
+        run: ../cancho/target/release/cancho test tests/keys_test.cho src/keys.cho --std
+      - name: Build the keyboard teleoperation
+        working-directory: robot
+        run: ../cancho/target/release/cancho build --std tools/teleop.cho src/libc.cho src/keys.cho src/term.cho src/core.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho -o build/teleop
+      - name: Teleoperation on a pseudo-terminal against the simulated bus (task #10, T1-T7)
+        working-directory: robot
+        run: python3 tests/teleop_gates.py build/teleop
+      - name: The teleoperation gates can fail
+        working-directory: robot
+        run: python3 tests/mutate_teleop.py ../cancho/target/release/cancho
+      - name: Teleoperation authority is within its ceiling
+        working-directory: robot
+        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/teleop.ceiling tools/teleop.cho src/libc.cho src/keys.cho src/term.cho src/core.cho src/serial.cho src/serial_write.cho src/feetech.cho src/feetech_write.cho src/calibration.cho src/robot.cho src/safety.cho src/kinematics.cho src/so101.cho
       - name: The toolbox contract tests (the catalogue, the tags the design names)
         working-directory: robot
         run: ../cancho/target/release/cancho test tests/check_test.cho src/check.cho src/rules.cho src/safety.cho src/ik.cho src/kinematics.cho src/so101.cho --std
