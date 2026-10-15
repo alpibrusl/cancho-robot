@@ -97,7 +97,8 @@ class Terminal:
         return self.out.decode("utf-8", "replace")
 
 
-CODES = {"q": 113, "s": 115, "w": 119, "a": 97}
+CODES = {"q": 113, "s": 115, "w": 119, "a": 97, "p": 112}
+PAN = 1
 
 
 def goal_writes(rows, ident):
@@ -175,7 +176,7 @@ def main():
         m["qlim_down"] = term.hold(["a", "s"], 0.6, CODES)  # the elbow at its span, the shoulder down: still moves
         m["qlim_up"] = term.up(["a", "s"], CODES)
         term.pump(0.6)
-        m["quiet_down"] = term.hold(["a"], 0.3, CODES)  # a: the shoulder down, then nothing more is sent
+        m["quiet_down"] = term.hold(["p"], 0.3, CODES)  # p: the base, 200 degrees of room; then nothing more is sent
         m["quiet_last"] = time.monotonic()
         term.pump(1.8)
         return m
@@ -195,7 +196,7 @@ def main():
     el = [t for t, _ in changes(elbow, m["qs_down"], m["qs_up"])]
     gate("T3 keys combine", len(both) >= 5 and len(el) >= 5, f"{len(both)} lift and {len(el)} elbow changes together")
     guard_end = m["quiet_last"] + 1.0 + 0.04
-    quiet = changes(lift, m["quiet_down"])
+    quiet = changes(goal_writes(rows, PAN), m["quiet_down"])
     gate("T4 a connection gone quiet stops the arm", quiet and max(t for t, _ in quiet) <= guard_end,
          f"last change {max(t for t, _ in quiet) - m['quiet_last']:.2f} s after the last event" if quiet else "never moved")
     lim = changes(lift, m["qlim_down"], m["qlim_up"])

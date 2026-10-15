@@ -129,8 +129,11 @@ fn test_kitty_keys_combine_and_stop_on_release() -> [] int {
         test.assert(v[1] == 0.0 && v[2] == 21.0); // lift stops at once, elbow goes on
         keys.velocities(until, 31, true, v);
         test.assert(v[2] == 21.0 * keys.fine()); // shift: a quarter
-        // a held key whose repeats stop arriving (a lost connection) stops after the guard
-        keys.velocities(until, 10 + keys.kitty_hold_ms() + 1, false, v);
+        // a held key whose events stop arriving (a lost connection) stops after a second: still moving at 0.99 s,
+        // stopped at 1.01 s (a number, not the constant, so a changed guard is a failing test)
+        keys.velocities(until, 10 + 990, false, v);
+        test.assert(v[2] == 21.0);
+        keys.velocities(until, 10 + 1010, false, v);
         test.assert(v[2] == 0.0);
     }
     return 0;
