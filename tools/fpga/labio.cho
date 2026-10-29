@@ -1,0 +1,87 @@
+edition 8;
+
+module labio;
+
+import std.io;
+import std.buffer;
+
+// A copy of boards/tang-nano-20k/host/labio.cho of cancho-hdl (the Tang Nano 20K lab design, rtl/lab.v and lab/lab.chw).
+// labio.cho -- register access to the lab design (rtl/lab.v, lab/lab.chw) over the UART bridge, from cancho, through the Tty
+// capability. No foreign call. Every function takes the port and the poller the caller opened; frames are caller-owned slices.
+
+// the base address of lab/lab.chw
+pub fn base() -> [] int { return 1073741824; }
+
+// send `cmd`, then collect `want` bytes into `out`; answers how many arrived (poller-driven, bounded)
+pub fn exchange[&a, &b, &c, &d](q: &!a Port, pw: &!b Poller, cmd: &c [byte], out: &!d [byte], want: int) -> [tty_write, tty_read, poll] int {
+    tty_write(q, cmd);
+    var n = 0;
+    var tries = 0;
+    region r {
+        let chunk = alloc_slice[r](16, byte_of(0));
+        let ev = alloc_slice[r](2, 0);
+        while n < want && tries < 400 {
+            poller_wait(pw, ev, 10);
+            let k = tty_read(q, chunk);
+            var i = 0;
+            while i < k && n < want {
+                out[n] = chunk[i];
+                n = n + 1;
+                i = i + 1;
+            }
+            tries = tries + 1;
+        }
+    }
+    return n;
+}
+
+// 'W' addr data -> the AXI response (0 OKAY), or -1 if none came. `frame` has 9 bytes, `ans` at least 1.
+pub fn write_reg[&a, &b, &c](q: &!a Port, pw: &!b Poller, frame: &!c [byte], ans: &!c [byte], off: int, data: int) -> [tty_write, tty_read, poll] int {
+    let addr = base() + off;
+    frame[0] = byte_of(87);
+    frame[1] = byte_of(addr / 16777216 % 256);
+    frame[2] = byte_of(addr / 65536 % 256);
+    frame[3] = byte_of(addr / 256 % 256);
+    frame[4] = byte_of(addr % 256);
+    frame[5] = byte_of(data / 16777216 % 256);
+    frame[6] = byte_of(data / 65536 % 256);
+    frame[7] = byte_of(data / 256 % 256);
+    frame[8] = byte_of(data % 256);
+    let n = exchange(q, pw, frame, ans, 1);
+    if n != 1 { return 0 - 1; }
+    return int_of(ans[0]);
+}
+
+// 'R' addr -> the 32-bit register value, or -1 (no answer) / -2 (the bridge answered an error). `cmd` has 5 bytes, `ans` at least 5.
+pub fn read_reg[&a, &b, &c](q: &!a Port, pw: &!b Poller, cmd: &!c [byte], ans: &!c [byte], off: int) -> [tty_write, tty_read, poll] int {
+    let addr = base() + off;
+    cmd[0] = byte_of(82);
+    cmd[1] = byte_of(addr / 16777216 % 256);
+    cmd[2] = byte_of(addr / 65536 % 256);
+    cmd[3] = byte_of(addr / 256 % 256);
+    cmd[4] = byte_of(addr % 256);
+    let n = exchange(q, pw, cmd, ans, 5);
+    if n != 5 { return 0 - 1; }
+    if int_of(ans[0]) != 0 { return 0 - 2; }
+    return int_of(ans[1]) * 16777216 + int_of(ans[2]) * 65536 + int_of(ans[3]) * 256 + int_of(ans[4]);
+}
+
+pub fn pause[&p](pw: &!p Poller, ms: int) -> [poll] int {
+    region r {
+        let ev = alloc_slice[r](2, 0);
+        poller_wait(pw, ev, ms);
+    }
+    return 0;
+}
+
+// one line: text, a number, a tail, newline
+pub fn say[&h, &i](heap: &!h Heap, io: &!i Io, text: &static [byte], v: int, tail: &static [byte]) -> [heap, io_write] int {
+    var line = buffer.empty(heap, 80);
+    line = buffer.append(heap, line, text);
+    line = buffer.push_nat(heap, line, v);
+    line = buffer.append(heap, line, tail);
+    line = buffer.push(heap, line, byte_of(10));
+    borrow line as &lb in { io.write_all(io, buffer.bytes(lb)); }
+    buffer.drop(heap, line);
+    return 0;
+}
