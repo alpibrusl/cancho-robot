@@ -3,7 +3,7 @@
 Written 2026-10-29. Answers the first step of issue #31. **Nothing here has touched a servo or the servo bus**, and it is not claimed
 to. What ran is a bus recorder and a deadman in an FPGA, driven from cancho. The designs, the measurements and the tests are in
 [cancho-hdl](https://github.com/alpibrusl/cancho-hdl) (`boards/tang-nano-20k/`, `docs/fpga-experiments.md`); this repository holds the cancho
-tool that reads the recorder (`tools/fpga/busrec.cho`, with a copy of `labio.cho`).
+tool that reads the recorder (`fpga/busrec.cho`, with a copy of `labio.cho`).
 
 ## What was run
 
@@ -13,7 +13,7 @@ A Sipeed Tang Nano 20K (Gowin GW2AR-18) on this machine's USB, driven only throu
 * **Recorder** (`rtl/lab.v`, the analyzer): timestamps every edge of a probe pin on the 27 MHz clock (37 ns) into a 512-entry FIFO; its
   registers are a checked contract (`lab/lab.chw`, `chw check` clean) and the generated block reads the instrument through an input
   (cancho-hdl#21).
-* **`tools/fpga/busrec.cho`**: arms the recorder on the board's serial RX pin, sends `H`, `i` and `0x55` 30 ms apart, stops, drains the
+* **`fpga/busrec.cho`**: arms the recorder on the board's serial RX pin, sends `H`, `i` and `0x55` 30 ms apart, stops, drains the
   edges and decodes 8N1 frames at 234.375 ticks a bit, sampling mid-bit. **Measured:** 51 edges, 12 frames: the three bytes sent decode
   as 72, 105 and 85; the nine bytes of the register write that stopped the capture follow (`W`, the address 0x40000000 and the data);
   consecutive bytes of one write are 2343 ticks apart (10 bit times); `H` to `i` is 816,589 ticks, 30.2 ms by the FPGA's clock.
