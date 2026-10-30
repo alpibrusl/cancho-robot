@@ -437,6 +437,42 @@ pub fn within_joint_limits[&g, &l](degrees: &g [float], limits: &l [float]) -> [
 // The workspace bound, in the arm's OWN frame: the gripper's position in base_link's frame within the box
 // [x 0.05..0.45, y -0.35..0.35, z -0.30..0.50]. lex-robot#218's defect was a grant in the robot's frame checked
 // in the arm's; the bound is declared on ArmPoint and only `to_robot` crosses frames.
+fn outside_by(v: float, low: float, high: float) -> [] float {
+    if v < low {
+        return low - v;
+    }
+    if v > high {
+        return v - high;
+    }
+    return 0.0;
+}
+
+// How far the gripper of the pose `degrees` is outside the workspace bound, in metres (0 inside), or -1 when the
+// kinematics refuse the pose.
+pub fn workspace_excess[&d](degrees: &d [float]) -> [] float {
+    region a {
+        let pose = alloc_slice[a](16, 0.0);
+        if kinematics.forward(degrees, pose) != 0 {
+            return -1.0;
+        }
+        let ex = outside_by(pose[3], workspace_min_x(), workspace_max_x());
+        let ey = outside_by(pose[7], workspace_min_y(), workspace_max_y());
+        let ez = outside_by(pose[11], workspace_min_z(), workspace_max_z());
+        return sqrt(ex * ex + ey * ey + ez * ez);
+    }
+}
+
+// The workspace bound, from where the arm is: a request inside it, or -- when the arm is already outside (its rest
+// pose folds the gripper below and behind the bound) -- no further outside than it is now, within the slack.
+pub fn workspace_allowed[&r, &c](request: &r [float], current: &c [float]) -> [] bool {
+    let after = workspace_excess(request);
+    if after == 0.0 {
+        return true;
+    }
+    let before = workspace_excess(current);
+    return after > 0.0 && before > 0.0 && after <= before + clearance_slack_m();
+}
+
 pub fn within_workspace[&d](degrees: &d [float]) -> [] bool {
     region a {
         let pose = alloc_slice[a](16, 0.0);
@@ -499,6 +535,57 @@ fn clearance_of[&c, &o](caps: &c [Capsule], i: int, other: &o [Capsule], j: int)
             return capsule_clearance(x, y);
         }
     }
+}
+
+// How much a clearance may shrink between two readings of a still pose before it counts as getting closer.
+pub fn clearance_slack_m() -> [] float {
+    return 0.0005;
+}
+
+fn pair_ok(after: float, before: float) -> [] bool {
+    if after >= margin() {
+        return true;
+    }
+    return before < margin() && after >= before - clearance_slack_m();
+}
+
+// Recovery from a pose that already violates a clearance (the arms rest where the estimated geometry says they
+// touch: design section 12). `caps` is the requested pose, `from` the current one, both of the same arm, and
+// `other` the other arm's capsules (or none). True when every pair the request violates was violated as much or
+// more by the current pose: the request may stay or move away, never closer, and never into a NEW violation of any
+// object. Pairs are the ones collision_rule judges: tower, cart (past the mounted links), the other arm.
+pub fn no_violation_worse[&c, &f, &o](caps: &c [Capsule], from: &f [Capsule], other: &o [Capsule], with_tray: bool) -> [] bool {
+    let tw = tower();
+    borrow tw as &w in {
+        var i = 0;
+        while i < len(caps) {
+            let c = caps[i];
+            let d = from[i];
+            borrow c as &cc in {
+                borrow d as &dd in {
+                    if i > 0 && !pair_ok(capsule_clearance(cc, w), capsule_clearance(dd, w)) {
+                        return false;
+                    }
+                    if with_tray && i >= mounted_links() && !pair_ok(tray_clearance(cc), tray_clearance(dd)) {
+                        return false;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+    }
+    var j = 1;
+    while j < len(caps) {
+        var k = 1;
+        while k < len(other) {
+            if !pair_ok(clearance_of(caps, j, other, k), clearance_of(from, j, other, k)) {
+                return false;
+            }
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    return true;
 }
 
 pub fn collision_rule[&c, &o](caps: &c [Capsule], other: &o [Capsule], with_tray: bool) -> [] int {
@@ -583,6 +670,75 @@ pub fn deadman_holds(since_ms: int) -> [] bool {
 
 // ── approve ──────────────────────────────────────────────────────────────────────────────────────────────
 
+// How far a held goal and the joint's reading may differ while the joint is still: a request that keeps an
+// out-of-span joint where it was asked to be must not be refused because the servo settled short of it. Measured on
+// the robot on 2026-10-12: under load the servos settle 0.8 to 1.0 degree from their goal (the right wrist held at
+// -76.3 read -75.7, and a 0.5-degree slack refused every move of that arm).
+pub fn limit_slack_deg() -> [] float {
+    return 1.5;
+}
+
+// One joint's request against its span [low, high], from where it is: inside the span, or, when the joint is already
+// outside it, on the same side and no further out than `current` (plus the reading's slack).
+pub fn joint_allowed(request: float, current: float, low: float, high: float) -> [] bool {
+    if request >= low && request <= high {
+        return true;
+    }
+    if request < low {
+        return current < low && request >= current - limit_slack_deg();
+    }
+    return current > high && request <= current + limit_slack_deg();
+}
+
+// limit.joint for all five joints, from where the arm is (joint_allowed): the first joint refused, or -1.
+pub fn refused_joint[&r, &c, &l](request: &r [float], current: &c [float], limits: &l [float]) -> [] int {
+    var i = 0;
+    while i < so101.moving() {
+        if !joint_allowed(request[i], current[i], limits[i * 2], limits[i * 2 + 1]) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// collision.*: the rule `request` is refused with, or rule_ok(). `other` is the other arm's five angles, or empty
+// when it is absent; a non-empty one is judged at ITS OWN mount, mirrored about the robot's centre line. A request
+// that violates a clearance is refused unless the arm is already there and the request moves it no closer to
+// anything (no_violation_worse), which is how an arm leaves a rest pose the estimated geometry calls a contact.
+pub fn collision_verdict[&r, &c, &m, &o](request: &r [float], current: &c [float], mount: &m Mount, other: &o [float]) -> [] int {
+    region a {
+        let caps = alloc_slice[a](so101.transforms(), Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+        if arm_capsules(request, mount, caps) != 0 {
+            return rule_collision_tower();
+        }
+        let from = alloc_slice[a](so101.transforms(), Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+        if arm_capsules(current, mount, from) != 0 {
+            return rule_collision_tower();
+        }
+        if len(other) == 0 {
+            let none = alloc_slice[a](0, Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+            let rule = collision_rule(caps, none, true);
+            if rule != rule_ok() && !no_violation_worse(caps, from, none, true) {
+                return rule;
+            }
+        } else {
+            let other_mount = other_mount_of(mount);
+            let oc = alloc_slice[a](so101.transforms(), Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
+            borrow other_mount as &om in {
+                if arm_capsules(other, om, oc) != 0 {
+                    return rule_collision_other();
+                }
+            }
+            let rule = collision_rule(caps, oc, true);
+            if rule != rule_ok() && !no_violation_worse(caps, from, oc, true) {
+                return rule;
+            }
+        }
+    }
+    return rule_ok();
+}
+
 // The one function every motion goes through. `request` is the five goal angles (degrees, LeRobot's), `current`
 // the arm's present angles, `limits` the measured joint limits (min, max per joint), `mount` the arm's mount,
 // `other` the other arm's present angles if it is on the robot, `since_ms` the time since the last fresh request
@@ -611,17 +767,16 @@ pub fn approve[&r, &c, &l, &m, &g, &s, &j, &o](request: &r [float], current: &c 
     if len(request) < so101.moving() || len(limits) < so101.moving() * 2 {
         return rule_joint();
     }
-    // limit.joint: the request's angles are inside the measured spans.
-    var i = 0;
-    while i < so101.moving() {
-        if request[i] < limits[i * 2] || request[i] > limits[i * 2 + 1] {
-            joint[0] = i;
-            return rule_joint();
-        }
-        i = i + 1;
+    // limit.joint: the request's angles are inside the measured spans -- or, for a joint the arm is already past
+    // (its rest pose can fold a little beyond what calibration swept), no further out than it is now, so the
+    // arm can leave rest by moving that joint back toward its span or by leaving it where it is.
+    let refused = refused_joint(request, current, limits);
+    if refused >= 0 {
+        joint[0] = refused;
+        return rule_joint();
     }
-    // limit.workspace: the gripper inside the bound, in this arm's own frame.
-    if !within_workspace(request) {
+    // limit.workspace: the gripper inside the bound, in this arm's own frame (or no further out than it is).
+    if !workspace_allowed(request, current) {
         return rule_workspace();
     }
     // ik.jump: no joint further than the distance justifies.
@@ -640,33 +795,10 @@ pub fn approve[&r, &c, &l, &m, &g, &s, &j, &o](request: &r [float], current: &c 
         joint[0] = worst;
         return rule_ik_jump();
     }
-    // collision.*: this arm's requested pose against the tower, the tray and the other arm. An empty `other`
-    // slice means the other arm is absent; a non-empty one is judged at ITS OWN mount, mirrored about the
-    // robot's centre line.
-    region a {
-        let caps = alloc_slice[a](so101.transforms(), Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
-        if arm_capsules(request, mount, caps) != 0 {
-            return rule_collision_tower();
-        }
-        if len(other) == 0 {
-            let none = alloc_slice[a](0, Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
-            let rule = collision_rule(caps, none, true);
-            if rule != rule_ok() {
-                return rule;
-            }
-        } else {
-            let other_mount = other_mount_of(mount);
-            let oc = alloc_slice[a](so101.transforms(), Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
-            borrow other_mount as &om in {
-                if arm_capsules(other, om, oc) != 0 {
-                    return rule_collision_other();
-                }
-            }
-            let rule = collision_rule(caps, oc, true);
-            if rule != rule_ok() {
-                return rule;
-            }
-        }
+    // collision.*: this arm's requested pose against the tower, the tray and the other arm (collision_verdict).
+    let hit = collision_verdict(request, current, mount, other);
+    if hit != rule_ok() {
+        return hit;
     }
     // limit.speed: a clamp, not a refusal. The goals interpolate between the current pose and the request.
     scale[0] = speed_scale(current, request, dt_ms);

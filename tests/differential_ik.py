@@ -50,7 +50,7 @@ RECORDED = [
     [-6.6, -65.9, 92.0, -74.9, -106.5],
 ]
 
-# The measured spans of the left arm (tests/fixtures/calibration/xle_left.json), degrees.
+# The measured spans of one arm (tests/fixtures/calibration/xle_left.json, the physical right arm), degrees.
 LIMITS = np.array([[-113.2, 113.2], [-90.5, 90.5], [-95.4, 95.4], [-75.3, 75.3], [-180.0, 180.0]])
 
 
