@@ -71,11 +71,13 @@ The safety core stays the only thing that can commit a motion. The gate is a sec
 |---|---|---|
 | S1 this document | nothing | merged |
 | S2 tap on one arm (A) | an adapter, a level shifter, an operator | idle level, voltage and a ping/read round trip recorded and compared with scservo_sdk on the same bus |
-| S3 host module with a dry run | cancho-hdl's limit contract | the differential test of §5 passes; ceiling names the device only |
+| S3 host module with a dry run | cancho-hdl's limit contract | **built, issue #36**: `src/gate.cho`, `tests/gate_test.cho` (6 tests), `tests/gate_driver.cho` (dry run, ceiling `io_read io_write`). Still open: the register map is a *proposal* (limits at 0x10, MIN/MAX per joint) that cancho-hdl's `deadman.chw` does not have, and the differential test against the safety core's limits is not written |
 | S4 inline gate on one arm (B) | S2, S3, direction control measured | an out-of-limit write is refused on the bus (seen in the recorder) and the deadman drops torque within the declared time |
 | S5 cameras on the Pi | `Camera` on aarch64 | numbers measured on the Pi and written into cancho's `docs/camera.md` |
 
 ## 7. Not claimed
+
+* That any gate has the limit registers `src/gate.cho` writes: cancho-hdl has CTRL, TIMEOUT_MS, KICK and STATUS only. The module sends nothing; its dry run prints the writes it would make.
 
 * That the FPGA can be put inline without changing the bus's timing: unmeasured.
 * That the Tang Nano 20K has the pins, the levels or the speed for both buses: unmeasured.

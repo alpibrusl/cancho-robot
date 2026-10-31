@@ -190,3 +190,9 @@ jobs:
       - name: Check tool authority is within its ceiling (the proof it sends nothing)
         working-directory: robot
         run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/check_driver.ceiling tests/check_driver.cho src/check.cho src/rules.cho src/safety.cho src/ik.cho src/kinematics.cho src/so101.cho
+      - name: Gate host module tests (register plan, refusals, enable sent last; issue #36)
+        working-directory: robot
+        run: ../cancho/target/release/cancho test tests/gate_test.cho src/gate.cho src/calibration.cho --std
+      - name: Gate dry-run authority is within its ceiling (the proof it sends nothing)
+        working-directory: robot
+        run: python3 tests/authority_check.py ../cancho/target/release/cancho authority/gate_driver.ceiling tests/gate_driver.cho src/gate.cho

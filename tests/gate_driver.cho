@@ -1,0 +1,81 @@
+edition 7;
+module gate_main;
+import std.io;
+import gate;
+
+// The dry run of the hardware gate's host module (issue #36): reads one line of 14 integers -- six MIN ticks, six
+// MAX ticks, the deadman timeout and the control cycle, both in ms -- and prints what it WOULD write, in the
+// order it would send it, as `offset value` lines, or `refused N`. Nothing is sent anywhere: the authority
+// ceiling is standard input and output, which is the proof.
+
+fn run[&i](io: &!i Io) -> [io_read, io_write] int {
+    region r {
+        let vals = alloc_slice[r](14, 0);
+        var k = 0;
+        var in_number = false;
+        var c = getchar(io);
+        while c >= 0 && c != '\n' {
+            if c >= '0' && c <= '9' {
+                if k < 14 {
+                    vals[k] = vals[k] * 10 + (c - '0');
+                }
+                in_number = true;
+            } else {
+                if in_number {
+                    k = k + 1;
+                }
+                in_number = false;
+            }
+            c = getchar(io);
+        }
+        if in_number {
+            k = k + 1;
+        }
+        if k != 14 {
+            return 2;
+        }
+        let mins = alloc_slice[r](6, 0);
+        let maxs = alloc_slice[r](6, 0);
+        var j = 0;
+        while j < 6 {
+            mins[j] = vals[j];
+            maxs[j] = vals[6 + j];
+            j = j + 1;
+        }
+        let why = gate.refusal(mins, maxs, vals[12], vals[13]);
+        if why != 0 {
+            io.write_all(io, "refused ");
+            io.print_int(io, why);
+            io.newline(io);
+            return 8;
+        }
+        var n = 0;
+        while n < gate.plan_length() {
+            let i = gate.send_order(n);
+            io.print_int(io, gate.plan_offset(i));
+            io.space(io);
+            io.print_int(io, gate.plan_value(i, mins, maxs, vals[12]));
+            io.newline(io);
+            n = n + 1;
+        }
+    }
+    return 0;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec } = split(world);
+    release(net);
+    release(clock);
+    release(ffi);
+    release(fs);
+    release(args);
+    release(signals);
+    release(exec);
+    release(heap);
+    var status = 0;
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    release(io);
+    return status;
+}
