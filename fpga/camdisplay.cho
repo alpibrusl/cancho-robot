@@ -9,9 +9,11 @@ import std.io;
 //
 // One cancho program owns both devices: the camera through `Camera` (320x240 grey, the newest frame, as `camera_hello` does) and
 // the board's serial port through `Tty` (/dev/ttyUSB1 at 1 Mbaud). Each frame goes out as the four bytes A5 5A C3 3C and then
-// 76,800 bytes; the board keeps it in block RAM and shows it at 2x. The USB serial bridge of the board drops bytes when it is
-// written to faster than the line, so the frame leaves in chunks of 128 bytes a millisecond apart (measured: 15 of 15 frames
-// arrived; 512-byte chunks back to back lost them). About one frame a second. Runs until it is stopped or a device fails.
+// 76,800 bytes; the board keeps it in block RAM and shows it at 2x. The frame goes out at the line rate (1 Mbaud, 0.77 s a frame,
+// about 1.2 frames a second; measured: 60 of 60 frames of random bytes arrived written whole, in 512-byte and in 4096-byte chunks).
+// What the board does NOT tolerate is a pause inside a frame: after about 78 ms without a byte it drops the frame in progress. (An
+// earlier version of this program paced its writes, on a wrong reading of a test that had a 0.2 s pause after the header.)
+// Runs until it is stopped or a device fails.
 // Authority: one camera and one serial device under /dev (`main`'s row names the camera; the serial port is a `Tty` narrowed to /dev, which `main` does not list, as `camfilter` does not).
 
 fn main(world: World) -> [camera_open("/dev"), camera_next] int {
@@ -97,15 +99,20 @@ fn main(world: World) -> [camera_open("/dev"), camera_next] int {
                                                                                 let skip = tty_read(q, sink);
                                                                             }
                                                                             var off = 0;
-                                                                            while off < 76800 && stuck < 2000 {
-                                                                                var len = 128;
+                                                                            while off < 76800 && stuck < 20000 {
+                                                                                var len = 4096;
                                                                                 if 76800 - off < len { len = 76800 - off; }
                                                                                 let w = tty_write(q, px[off..off + len]);
-                                                                                if w > 0 { off = off + w; } else { stuck = stuck + 1; }
-                                                                                borrow mut p as &!pw in { poller_wait(pw, ev, 1); }
+                                                                                if w > 0 {
+                                                                                    off = off + w;
+                                                                                } else {
+                                                                                    // the serial buffer is full: let it drain, then try again
+                                                                                    stuck = stuck + 1;
+                                                                                    borrow mut p as &!pw in { poller_wait(pw, ev, 1); }
+                                                                                }
                                                                                 let skip = tty_read(q, sink);
                                                                             }
-                                                                            if stuck >= 2000 {
+                                                                            if stuck >= 20000 {
                                                                                 code = 8;
                                                                                 running = false;
                                                                             } else {
