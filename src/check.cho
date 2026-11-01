@@ -76,7 +76,7 @@ fn data_object[&h, &c, &q, &l, &m, &o, &g](heap: &!h Heap, current: &c [float], 
     w = json.put_key(heap, w, "rule");
     w = json.put_string(heap, w, "limit.joint");
     w = json.put_key(heap, w, "outcome");
-    if safety.within_joint_limits(request, limits) {
+    if safety.refused_joint(request, current, limits) < 0 {
         w = json.put_string(heap, w, "pass");
     } else {
         w = json.put_string(heap, w, "refuse");
@@ -87,7 +87,7 @@ fn data_object[&h, &c, &q, &l, &m, &o, &g](heap: &!h Heap, current: &c [float], 
     w = json.put_key(heap, w, "rule");
     w = json.put_string(heap, w, "limit.workspace");
     w = json.put_key(heap, w, "outcome");
-    if safety.within_workspace(request) {
+    if safety.workspace_allowed(request, current) {
         w = json.put_string(heap, w, "pass");
     } else {
         w = json.put_string(heap, w, "refuse");
@@ -109,31 +109,10 @@ fn data_object[&h, &c, &q, &l, &m, &o, &g](heap: &!h Heap, current: &c [float], 
     w = json.put_key(heap, w, "rule");
     w = json.put_string(heap, w, "collision");
     w = json.put_key(heap, w, "outcome");
-    region a {
-        let caps = alloc_slice[a](so101.transforms(), safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
-        let oc = alloc_slice[a](so101.transforms(), safety.Capsule { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, radius: 0.0 });
-        var other_mount = safety.other_mount_of(mount);
-        region a2 {
-            if safety.arm_capsules(request, mount, caps) != 0 {
-                w = json.put_string(heap, w, "refuse");
-            } else {
-                var rule = safety.rule_ok();
-                if len(other) >= so101.moving() {
-                    borrow other_mount as &om in {
-                        if safety.arm_capsules(other, om, oc) == 0 {
-                            rule = safety.collision_rule(caps, oc, true);
-                        }
-                    }
-                } else {
-                    rule = safety.collision_rule(caps, oc, true);
-                }
-                if rule == safety.rule_ok() {
-                    w = json.put_string(heap, w, "pass");
-                } else {
-                    w = json.put_string(heap, w, "refuse");
-                }
-            }
-        }
+    if safety.collision_verdict(request, current, mount, other) == safety.rule_ok() {
+        w = json.put_string(heap, w, "pass");
+    } else {
+        w = json.put_string(heap, w, "refuse");
     }
     w = json.end_object(heap, w);
     // limit.speed: a clamp, reported as a clamp

@@ -1,0 +1,72 @@
+edition 5;
+
+module serial_write;
+
+import feetech;
+import feetech_write;
+import calibration;
+import serial;
+
+// `serial_write` -- the two writes the controller makes: goal positions and torque, each one SYNC WRITE to the
+// broadcast id. It holds no foreign call (those are `serial`'s) and decides nothing (that is `safety` and
+// `core`'s): it turns ticks into the packet LeRobot would send for them. Its only caller is `core` (gate A3),
+// so a program that does not import `core` cannot reach it, and `tools/scan` imports neither.
+
+pub fn goal_position() -> [] int {
+    return 42;
+}
+
+pub fn torque_enable() -> [] int {
+    return 40;
+}
+
+// SYNC WRITE Goal_Position: servo `ids[k]` to `ticks[k]`, for k below `n`. Goal_Position is sign-magnitude at bit
+// 15 (calibration.sign_bit_position), little-endian. Answers the bytes sent, or a negative error.
+pub fn commit_goals[&f, &i, &t](ffi: &f Ffi("libc"), fd: int, ids: &i [int], ticks: &t [int], n: int) -> [ffi("libc")] int {
+    var sent = 0;
+    region a {
+        let blocks = alloc_slice[a](n * 3, byte_of(0));
+        var k = 0;
+        while k < n {
+            let raw = calibration.encode_sign(ticks[k], calibration.sign_bit_position());
+            blocks[k * 3] = byte_of(ids[k]);
+            blocks[k * 3 + 1] = byte_of(raw % 256);
+            blocks[k * 3 + 2] = byte_of(raw / 256);
+            k = k + 1;
+        }
+        let pkt = alloc_slice[a](feetech.max_packet(), byte_of(0));
+        let m = feetech_write.sync_write(pkt, goal_position(), 2, blocks);
+        if m < 0 {
+            sent = m;
+        } else {
+            sent = serial.send(ffi, fd, pkt, m);
+        }
+    }
+    return sent;
+}
+
+// SYNC WRITE Torque_Enable: 1 for every servo in `ids[0..n]` when `on`, else 0.
+pub fn set_torque[&f, &i](ffi: &f Ffi("libc"), fd: int, ids: &i [int], n: int, on: bool) -> [ffi("libc")] int {
+    var sent = 0;
+    region a {
+        let blocks = alloc_slice[a](n * 2, byte_of(0));
+        var value = 0;
+        if on {
+            value = 1;
+        }
+        var k = 0;
+        while k < n {
+            blocks[k * 2] = byte_of(ids[k]);
+            blocks[k * 2 + 1] = byte_of(value);
+            k = k + 1;
+        }
+        let pkt = alloc_slice[a](feetech.max_packet(), byte_of(0));
+        let m = feetech_write.sync_write(pkt, torque_enable(), 1, blocks);
+        if m < 0 {
+            sent = m;
+        } else {
+            sent = serial.send(ffi, fd, pkt, m);
+        }
+    }
+    return sent;
+}

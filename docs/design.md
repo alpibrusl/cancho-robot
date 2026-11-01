@@ -151,6 +151,20 @@ each with a rule tag and a fixture:
 mount; a bound is declared on one of them. The collision geometry carries its known uncertainty: lex-robot measured the model putting the left
 gripper 22 mm inside the tray while it physically rested beside it, so the geometry is measured before task #8 trusts it (section 12).
 
+**From a pose already past a bound** (added 2026-10-12, task #9). The robot's arms rest where the bounds say they should not: folded
+a little past the spans calibration swept (left lift -91.2 against -90.5), with the gripper a few millimetres outside the workspace, and,
+by the estimated geometry, inside the tower's margin. A rule that judged only the request would refuse every motion from rest. So
+`limit.joint`, `limit.workspace` and `collision.*` judge the request **from where the arm is**: inside the bound passes; past it, the
+request may stay there (within a reading's slack: 0.5 degree, 0.5 mm) or move back, never further out; and for collisions each pair (link
+and tower, link and cart, link and the other arm's link) is judged on its own, so moving away from the tower into the cart is refused, and
+any pair that was clear and would not be is refused as before. `approve` and the toolbox's `check` call the same functions
+(`refused_joint`, `workspace_allowed`, `collision_verdict`), so what `check` says is what `approve` does. Each case is a test, and
+`tests/mutate_safety.py` holds a mutant for each half of each rule.
+
+**Arms are recognised by their servos.** Each servo stores its calibration (homing offset, range: registers 31, 9, 11), and `core.identify`
+answers the arm a bus carries from what its servos say, never from the USB adapter: on 2026-10-12 the two arm chains were on the opposite
+adapters from lex-robot's record. A bus whose servos match neither calibration is not driven.
+
 **What learns cannot change this.** The bounds, the checks and the e-stop are constants of this program; a client can request motion and read
 refusals, and nothing it sends changes a bound (the rule of the self-improving-controller note that motivated the epic).
 

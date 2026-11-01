@@ -1,0 +1,58 @@
+edition 5;
+
+import std.test;
+import core;
+import robot;
+import safety;
+
+// The parts of task #9's core that need no bus: the lead bound, the units, the limits and mounts the core hands
+// the safety core. What reaches the bus is tests/actuation_gates.py's, against the simulated bus.
+
+fn test_a_goal_leads_the_present_position_by_at_most_the_bound() -> [] int {
+    // A careless client asking 15 degrees ahead (inside ik.jump's 15-degree allowance) gets 8: pressing against an
+    // obstacle is a soft push, not a growing error (design section 5).
+    test.assert(core.lead(55.0, 40.0, core.lead_deg()) == 48.0);
+    test.assert(core.lead(25.0, 40.0, core.lead_deg()) == 32.0);
+    test.assert(core.lead(43.0, 40.0, core.lead_deg()) == 43.0);
+    test.assert(core.lead(70.0, 50.0, core.lead_percent()) == 60.0);
+    return 0;
+}
+
+fn test_the_limits_are_the_calibration_spans_in_degrees() -> [] int {
+    // The left arm is calibrated by xle_right.json (measured by hand, 2026-10-12): shoulder_pan 771..3065 ticks,
+    // so +-100.8 degrees about the range's middle.
+    region a {
+        let lim = alloc_slice[a](10, 0.0);
+        core.limits_of(robot.left(), lim);
+        test.assert(lim[0] < -100.7 && lim[0] > -100.9);
+        test.assert(lim[1] > 100.7 && lim[1] < 100.9);
+        // The right arm, by xle_left.json: wrist_flex 2060..3773, +-75.3
+        core.limits_of(robot.right(), lim);
+        test.assert(lim[6] < -75.2 && lim[6] > -75.4);
+    }
+    return 0;
+}
+
+fn test_units_are_degrees_for_joints_and_percent_for_the_gripper() -> [] int {
+    region a {
+        let ticks = alloc_slice[a](6, 0);
+        let units = alloc_slice[a](6, 0.0);
+        var j = 0;
+        while j < 6 {
+            ticks[j] = (robot.range_min(robot.left(), j) + robot.range_max(robot.left(), j)) / 2;
+            j = j + 1;
+        }
+        ticks[5] = robot.range_max(robot.left(), 5);
+        core.to_units(robot.left(), ticks, units);
+        test.assert(units[0] > -0.1 && units[0] < 0.1); // the middle of a span is 0 degrees
+        test.assert(units[5] > 99.9); // the gripper's max is 100 percent
+    }
+    return 0;
+}
+
+fn test_the_mounts_are_mirrored_about_the_centre_line() -> [] int {
+    let l = core.mount_of(robot.left());
+    let r = core.mount_of(robot.right());
+    test.assert(l.y > 0.0 && r.y < 0.0 && l.y == 0.0 - r.y && l.x == r.x && l.z == r.z);
+    return 0;
+}

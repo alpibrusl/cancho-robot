@@ -136,7 +136,7 @@ fn answer[&i, &l](io: &!i Io, line: &l [byte]) -> [io_write] int {
     return 0;
 }
 
-// The measured joint spans of the left arm's calibration file (tests/fixtures/calibration/xle_left.json),
+// The measured joint spans of one arm's calibration file (tests/fixtures/calibration/xle_left.json, the physical right arm),
 // in the degrees calibration.degrees reports.
 fn limits_of[&l](l: &!l [float]) -> [] int {
     l[0] = -113.2;

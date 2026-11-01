@@ -1,0 +1,17 @@
+# tools/play.cho, the playground console that drives the arms through core: the command line, the console in and
+# out, and libc for the bus, its clock and the pacing sleep. No network, no filesystem, no exec, no heap labels.
+args
+ffi("libc")
+io_read
+io_write
+foreign cfmakeraw
+foreign clock_gettime
+foreign close
+foreign open
+foreign read
+foreign strdup
+foreign tcflush
+foreign tcgetattr
+foreign tcsetattr
+foreign usleep
+foreign write
