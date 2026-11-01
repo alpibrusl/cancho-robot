@@ -5,7 +5,8 @@ module labio;
 import std.io;
 import std.buffer;
 
-// A copy of boards/tang-nano-20k/host/labio.cho of cancho-hdl (the Tang Nano 20K lab design, rtl/lab.v and lab/lab.chw).
+// A copy of boards/tang-nano-20k/host/labio.cho of cancho-hdl (the Tang Nano 20K lab design, rtl/lab.v and lab/lab.chw), refreshed for
+// the block commands (cancho-hdl#24); the bridge protocol is in cancho-hdl's docs/tang-nano-20k.md.
 // labio.cho -- register access to the lab design (rtl/lab.v, lab/lab.chw) over the UART bridge, from cancho, through the Tty
 // capability. No foreign call. Every function takes the port and the poller the caller opened; frames are caller-owned slices.
 
@@ -15,6 +16,40 @@ pub fn base() -> [] int { return 1073741824; }
 // send `cmd`, then collect `want` bytes into `out`; answers how many arrived (poller-driven, bounded)
 pub fn exchange[&a, &b, &c, &d](q: &!a Port, pw: &!b Poller, cmd: &c [byte], out: &!d [byte], want: int) -> [tty_write, tty_read, poll] int {
     tty_write(q, cmd);
+    var n = 0;
+    var tries = 0;
+    region r {
+        let chunk = alloc_slice[r](16, byte_of(0));
+        let ev = alloc_slice[r](2, 0);
+        while n < want && tries < 400 {
+            poller_wait(pw, ev, 10);
+            let k = tty_read(q, chunk);
+            var i = 0;
+            while i < k && n < want {
+                out[n] = chunk[i];
+                n = n + 1;
+                i = i + 1;
+            }
+            tries = tries + 1;
+        }
+    }
+    return n;
+}
+
+// like exchange, but sends only the first `len` bytes of `cmd`
+pub fn exchange_len[&a, &b, &c, &d](q: &!a Port, pw: &!b Poller, cmd: &c [byte], len: int, out: &!d [byte], want: int) -> [tty_write, tty_read, poll] int {
+    var sent = 0;
+    var spins = 0;
+    while sent < len && spins < 10000 {
+        region w {
+            let part = alloc_slice[w](len - sent, byte_of(0));
+            var j = 0;
+            while j < len - sent { part[j] = cmd[sent + j]; j = j + 1; }
+            let k = tty_write(q, part);
+            if k > 0 { sent = sent + k; }
+        }
+        spins = spins + 1;
+    }
     var n = 0;
     var tries = 0;
     region r {
@@ -64,6 +99,45 @@ pub fn read_reg[&a, &b, &c](q: &!a Port, pw: &!b Poller, cmd: &!c [byte], ans: &
     if n != 5 { return 0 - 1; }
     if int_of(ans[0]) != 0 { return 0 - 2; }
     return int_of(ans[1]) * 16777216 + int_of(ans[2]) * 65536 + int_of(ans[3]) * 256 + int_of(ans[4]);
+}
+
+// put a 32-bit big-endian word into `f` at `at`
+fn put32[&a](f: &!a [byte], at: int, v: int) -> [] int {
+    f[at] = byte_of(v / 16777216 % 256);
+    f[at + 1] = byte_of(v / 65536 % 256);
+    f[at + 2] = byte_of(v / 256 % 256);
+    f[at + 3] = byte_of(v % 256);
+    return 0;
+}
+
+// Block write (rtl/uart_axil_bridge.v, 'B' = same register n times, 'I' = consecutive registers). `frame` has 6 + 4 n bytes; the caller
+// has put word j at frame[6 + 4 j] with put_word(). Answers the bridge's one byte (0 OKAY, 2 if any word failed), or -1.
+pub fn block_write[&a, &b, &c, &d](q: &!a Port, pw: &!b Poller, frame: &!c [byte], ans: &!d [byte], off: int, inc: int, n: int) -> [tty_write, tty_read, poll] int {
+    frame[0] = byte_of(66);
+    if inc != 0 { frame[0] = byte_of(73); }
+    put32(frame, 1, base() + off);
+    frame[5] = byte_of(n);
+    let k = exchange_len(q, pw, frame, 6 + 4 * n, ans, 1);
+    if k != 1 { return 0 - 1; }
+    return int_of(ans[0]);
+}
+
+pub fn put_word[&a](frame: &!a [byte], j: int, v: int) -> [] int { return put32(frame, 6 + 4 * j, v); }
+
+// Block read ('E' = same register n times, 'D' = consecutive registers): n words land in `ans` at 4 j (big-endian), then the response byte
+// at ans[4 n]. `cmd` has 6 bytes. Answers the response byte, or -1 when fewer than 4 n + 1 bytes arrived.
+pub fn block_read[&a, &b, &c, &d](q: &!a Port, pw: &!b Poller, cmd: &!c [byte], ans: &!d [byte], off: int, inc: int, n: int) -> [tty_write, tty_read, poll] int {
+    cmd[0] = byte_of(69);
+    if inc != 0 { cmd[0] = byte_of(68); }
+    put32(cmd, 1, base() + off);
+    cmd[5] = byte_of(n);
+    let k = exchange(q, pw, cmd, ans, 4 * n + 1);
+    if k != 4 * n + 1 { return 0 - 1; }
+    return int_of(ans[4 * n]);
+}
+
+pub fn get_word[&a](ans: &a [byte], j: int) -> [] int {
+    return int_of(ans[4 * j]) * 16777216 + int_of(ans[4 * j + 1]) * 65536 + int_of(ans[4 * j + 2]) * 256 + int_of(ans[4 * j + 3]);
 }
 
 pub fn pause[&p](pw: &!p Poller, ms: int) -> [poll] int {

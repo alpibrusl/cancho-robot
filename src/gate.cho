@@ -1,0 +1,137 @@
+edition 5;
+
+module gate;
+
+// `gate` -- the host's half of the hardware gate (issue #36, docs/fpga-integration.md section 4): what to write to the
+// gate's registers so it refuses a goal position outside a joint's measured range, and the checks that make the
+// controller fail closed. Pure arithmetic over integers: no bus, no port, no file, so it is tested and dry-run
+// without hardware. Sending the writes (through fpga/labio.cho) is a later slice, and needs the placement
+// numbers of issue #34.
+//
+// The register map is a PROPOSAL: today cancho-hdl's deadman.chw has CTRL (0x00), TIMEOUT_MS (0x04), KICK (0x08)
+// and STATUS (0x0C), and no limit registers. This module assumes limit registers at 0x10, two words per joint --
+// MIN then MAX, in servo ticks -- and cancho-hdl's contract must be written to match, not the other way round.
+// Nothing here is a claim that a gate with these registers exists.
+
+pub fn base() -> [] int {
+    return 1073741824;
+}
+
+pub fn ctrl() -> [] int {
+    return 0;
+}
+
+pub fn timeout_ms() -> [] int {
+    return 4;
+}
+
+pub fn kick() -> [] int {
+    return 8;
+}
+
+pub fn status() -> [] int {
+    return 12;
+}
+
+// Joints per arm: the five body joints and the gripper.
+pub fn joints() -> [] int {
+    return 6;
+}
+
+// The servo's raw position range: goal positions are 0..4095 ticks.
+pub fn max_tick() -> [] int {
+    return 4095;
+}
+
+// Offset of joint `j`'s MIN register; its MAX is the next word. A joint outside 0..5 has no register: -1.
+pub fn limit_offset(j: int) -> [] int {
+    if j < 0 || j >= joints() {
+        return -1;
+    }
+    return 16 + 8 * j;
+}
+
+// A range the gate may be given: inside the servo's ticks and not empty.
+pub fn range_ok(min: int, max: int) -> [] bool {
+    return min >= 0 && max <= max_tick() && min < max;
+}
+
+// The deadman's timeout must leave room for jitter: at least two control cycles, and not zero (zero means it
+// never trips, which is no gate at all). Both in milliseconds.
+pub fn timeout_ok(timeout: int, cycle: int) -> [] bool {
+    return cycle > 0 && timeout >= 2 * cycle && timeout <= 65535;
+}
+
+// The write plan, as a numbered list of (offset, value). Writes 0 and 1 are the deadman's timeout and its
+// enable; they go LAST in the order the host sends them (see `enable_last`), so the gate is never enabled
+// with limits it has not been given. Entries 2 + 2j and 3 + 2j are joint j's MIN and MAX.
+pub fn plan_length() -> [] int {
+    return 2 + 2 * joints();
+}
+
+pub fn plan_offset(i: int) -> [] int {
+    if i == 0 {
+        return timeout_ms();
+    }
+    if i == 1 {
+        return ctrl();
+    }
+    if i < 2 || i >= plan_length() {
+        return -1;
+    }
+    let k = i - 2;
+    return limit_offset(k / 2) + 4 * (k % 2);
+}
+
+// The value of write `i`, from the six MIN and six MAX ticks and the timeout. -1 for an entry that does not exist.
+pub fn plan_value[&a, &b](i: int, mins: &a [int], maxs: &b [int], timeout: int) -> [] int {
+    if i == 0 {
+        return timeout;
+    }
+    if i == 1 {
+        return 1;
+    }
+    if i < 2 || i >= plan_length() {
+        return -1;
+    }
+    let k = i - 2;
+    if k % 2 == 0 {
+        return mins[k / 2];
+    }
+    return maxs[k / 2];
+}
+
+// The order the host sends the plan in: limits first (entries 2..), then the timeout, then ENABLE last.
+pub fn send_order(n: int) -> [] int {
+    if n < plan_length() - 2 {
+        return n + 2;
+    }
+    return n - (plan_length() - 2);
+}
+
+// May the plan be sent at all? Every joint's range must pass `range_ok` and the timeout `timeout_ok`.
+// Returns 0 for yes, or 1 + the first joint that fails, or 100 when the timeout fails.
+pub fn refusal[&a, &b](mins: &a [int], maxs: &b [int], timeout: int, cycle: int) -> [] int {
+    var j = 0;
+    while j < joints() {
+        if !range_ok(mins[j], maxs[j]) {
+            return 1 + j;
+        }
+        j = j + 1;
+    }
+    if !timeout_ok(timeout, cycle) {
+        return 100;
+    }
+    return 0;
+}
+
+// After the writes the host reads every register back and compares. Equal is the only success; the check is a
+// function so the controller cannot forget a register.
+pub fn readback_ok(wrote: int, read: int) -> [] bool {
+    return wrote == read;
+}
+
+// Torque may be enabled only when STATUS says TORQUE_OK (bit 0) and not TRIPPED (bit 1).
+pub fn armed(status_word: int) -> [] bool {
+    return status_word % 2 == 1 && status_word / 2 % 2 == 0;
+}
