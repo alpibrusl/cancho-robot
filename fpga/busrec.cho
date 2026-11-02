@@ -1,0 +1,123 @@
+edition 8;
+
+import std.io;
+import std.buffer;
+import labio;
+
+// busrec.cho -- a bus recorder in an FPGA, read from cancho: every byte seen on a serial line, with the FPGA's 27 MHz tick it started on.
+//
+//   busrec              sends 'H', 'i' and 0x55 on the board's own serial line, 30 ms apart, records for the whole time, decodes
+//
+// The recorder is the analyzer of the lab design (cancho-hdl: rtl/lab.v, lab/lab.chw): it timestamps every edge of its probe pin. Here the
+// probe is the board's UART RX pin, which is the line the host is writing to, so the recorder sees what the host really put on the wire.
+// This program turns the edges into bytes: 8N1 at 115200 baud (234.375 ticks a bit), sampled in the middle of each bit. It is the first
+// step of cancho-robot#31 (a recorder, tested here with a loopback of the host's own traffic, not on the servo bus: the servo bus is 1 Mbaud on
+// a GPIO pin and nothing here has touched it). The register write that stops the capture is on the line too, and is decoded as well.
+// Authority: standard output, the Tty capability under /dev, a poll. No filesystem, no network, no foreign call.
+
+fn level_at[&a, &b](ts: &a [int], lv: &b [int], n: int, t: int) -> [] int {
+    var l = 1;
+    var i = 0;
+    while i < n && ts[i] <= t { l = lv[i]; i = i + 1; }
+    return l;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(ffi); release(fs); release(args); release(net); release(signals); release(exec); release(clock);
+    let device = narrow(tty, "/dev");
+    var status_code = 0;
+    var failures = 0;
+    match poller_new() {
+        Polling::Failed(e) => { release(device); release(io); release(heap); return 1; }
+        Polling::Ok(open) => {
+            var p = open;
+            borrow device as &t in {
+                match tty_open(t, "/dev/ttyUSB1") {
+                    TtyOpened::Failed(errno) => { status_code = 3; }
+                    TtyOpened::Ok(port) => {
+                        borrow mut port as &!q in {
+                            if tty_configure(q, 115200) != 0 { status_code = 4; }
+                            tty_flush_input(q);
+                            borrow mut p as &!pw in { poller_add_tty(pw, q, 1, 1); }
+                            borrow mut p as &!pw in {
+                                region r {
+                                    let frame = alloc_slice[r](9, byte_of(0));
+                                    let cmd = alloc_slice[r](5, byte_of(0));
+                                    let ans = alloc_slice[r](8, byte_of(0));
+                                    let ts = alloc_slice[r](512, 0);
+                                    let lv = alloc_slice[r](512, 0);
+                                    labio.write_reg(q, pw, frame, ans, 0, 0);
+                                    labio.write_reg(q, pw, frame, ans, 0, 1);          // PROBE_SEL=0 (the UART RX pin), AN_EN=1
+                                    let one = alloc_slice[r](1, byte_of(72));
+                                    tty_write(q, one);
+                                    labio.pause(pw, 30);
+                                    one[0] = byte_of(105);
+                                    tty_write(q, one);
+                                    labio.pause(pw, 30);
+                                    one[0] = byte_of(85);
+                                    tty_write(q, one);
+                                    labio.pause(pw, 30);
+                                    labio.write_reg(q, pw, frame, ans, 0, 0);          // stop recording, then drain
+                                    let cnt = labio.read_reg(q, pw, cmd, ans, 8) % 65536;
+                                    var n = 0;
+                                    while n < cnt && n < 512 {
+                                        ts[n] = labio.read_reg(q, pw, cmd, ans, 12);
+                                        lv[n] = labio.read_reg(q, pw, cmd, ans, 16);
+                                        labio.write_reg(q, pw, frame, ans, 4, 1000 + n);
+                                        n = n + 1;
+                                    }
+                                    // decode: a frame starts at a falling edge; bit k is the line level at start + (k + 1/2) * 234.375 ticks (x8: 1875)
+                                    var i = 1;
+                                    var frames = 0;
+                                    var sum_msg = 0;
+                                    var last_end = 0;
+                                    while i < n {
+                                        if lv[i] == 0 && ts[i] >= last_end {
+                                            let start = ts[i];
+                                            var byte = 0;
+                                            var k = 0;
+                                            var weight = 1;
+                                            while k < 8 {
+                                                let at = start + (1875 * (2 * k + 3)) / 16;
+                                                if level_at(ts, lv, n, at) == 1 { byte = byte + weight; }
+                                                weight = weight * 2;
+                                                k = k + 1;
+                                            }
+                                            let stop = level_at(ts, lv, n, start + (1875 * 19) / 16);
+                                            last_end = start + (1875 * 19) / 16;
+                                            if stop != 1 { failures = failures + 1; }
+                                            frames = frames + 1;
+                                            borrow mut heap as &!h in { borrow mut io as &!i2 in {
+                                                labio.say(h, i2, "frame at tick ", start, "");
+                                                labio.say(h, i2, "   byte ", byte, "");
+                                            } }
+                                            if frames == 1 && byte != 72 { failures = failures + 1; }
+                                            if frames == 2 && byte != 105 { failures = failures + 1; }
+                                            if frames == 3 && byte != 85 { failures = failures + 1; }
+                                        }
+                                        i = i + 1;
+                                    }
+                                    borrow mut heap as &!h in { borrow mut io as &!i2 in {
+                                        labio.say(h, i2, "edges recorded: ", n, "");
+                                        labio.say(h, i2, "frames decoded (3 sent, then the 9 bytes of the register write that stopped the capture): ", frames, "");
+                                        labio.say(h, i2, "frames that did not decode as expected: ", failures, "");
+                                    } }
+                                    if frames < 12 { failures = failures + 1; }
+                                }
+                            }
+                        }
+                        tty_close(port);
+                    }
+                }
+            }
+            release(device);
+            poller_close(p);
+        }
+    }
+    release(io);
+    release(heap);
+    if status_code != 0 { return status_code; }
+    if failures != 0 { return 1; }
+    return 0;
+}

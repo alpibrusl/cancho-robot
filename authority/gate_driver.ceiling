@@ -1,0 +1,3 @@
+# tests/gate_driver.cho with the gate module: standard input and output, nothing else. The proof that the dry run sends nothing.
+io_read
+io_write

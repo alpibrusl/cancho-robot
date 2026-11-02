@@ -1,0 +1,106 @@
+import std.test;
+import gate;
+import calibration;
+
+// The host half of the hardware gate (issue #36): the register plan for the left arm's measured ranges
+// (tests/fixtures/calibration/xle_left.json), the refusals, the order, and the fail-closed status check.
+
+fn fill[&a, &b](mins: &!a [int], maxs: &!b [int]) -> [] int {
+    // xle_left.json: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper.
+    mins[0] = 884;
+    maxs[0] = 3460;
+    mins[1] = 1056;
+    maxs[1] = 3116;
+    mins[2] = 885;
+    maxs[2] = 3057;
+    mins[3] = 2060;
+    maxs[3] = 3773;
+    mins[4] = 0;
+    maxs[4] = 4095;
+    mins[5] = 2048;
+    maxs[5] = 3453;
+    return 0;
+}
+
+fn test_the_limit_registers_follow_the_deadmans() -> [] int {
+    test.assert_eq(gate.limit_offset(0), 16);
+    test.assert_eq(gate.limit_offset(5), 56);
+    test.assert_eq(gate.limit_offset(6), -1);
+    test.assert_eq(gate.limit_offset(-1), -1);
+    test.assert_eq(gate.plan_offset(2), 16);
+    test.assert_eq(gate.plan_offset(3), 20);
+    test.assert_eq(gate.plan_offset(13), 60);
+    test.assert_eq(gate.plan_offset(14), -1);
+    return 0;
+}
+
+fn test_no_two_writes_share_an_address() -> [] int {
+    var i = 0;
+    while i < gate.plan_length() {
+        var j = i + 1;
+        while j < gate.plan_length() {
+            test.assert(gate.plan_offset(i) != gate.plan_offset(j));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_the_plan_carries_the_calibrations_ranges() -> [] int {
+    region r {
+        let mins = alloc_slice[r](6, 0);
+        let maxs = alloc_slice[r](6, 0);
+        fill(mins, maxs);
+        test.assert_eq(gate.plan_value(0, mins, maxs, 200), 200);
+        test.assert_eq(gate.plan_value(1, mins, maxs, 200), 1);
+        test.assert_eq(gate.plan_value(2, mins, maxs, 200), 884);
+        test.assert_eq(gate.plan_value(3, mins, maxs, 200), 3460);
+        test.assert_eq(gate.plan_value(13, mins, maxs, 200), 3453);
+        test.assert_eq(gate.plan_value(14, mins, maxs, 200), -1);
+        // the gate's limit is the span the safety core's degrees come from: the middle is zero degrees
+        test.assert(calibration.degrees(mins[0], mins[0], maxs[0]) < 0.0);
+        test.assert_eq(gate.refusal(mins, maxs, 200, 20), 0);
+    }
+    return 0;
+}
+
+fn test_enable_is_sent_last() -> [] int {
+    var n = 0;
+    while n < gate.plan_length() - 1 {
+        test.assert(gate.send_order(n) != 1);
+        n = n + 1;
+    }
+    test.assert_eq(gate.send_order(gate.plan_length() - 1), 1);
+    test.assert_eq(gate.send_order(gate.plan_length() - 2), 0);
+    return 0;
+}
+
+fn test_a_bad_range_or_timeout_is_refused() -> [] int {
+    region r {
+        let mins = alloc_slice[r](6, 0);
+        let maxs = alloc_slice[r](6, 0);
+        fill(mins, maxs);
+        maxs[3] = 4096;
+        test.assert_eq(gate.refusal(mins, maxs, 200, 20), 4);
+        maxs[3] = 3773;
+        mins[1] = 3116;
+        test.assert_eq(gate.refusal(mins, maxs, 200, 20), 2);
+        mins[1] = 1056;
+        test.assert_eq(gate.refusal(mins, maxs, 30, 20), 100);
+        test.assert_eq(gate.refusal(mins, maxs, 0, 20), 100);
+        test.assert_eq(gate.refusal(mins, maxs, 200, 0), 100);
+        test.assert_eq(gate.refusal(mins, maxs, 70000, 20), 100);
+    }
+    return 0;
+}
+
+fn test_torque_needs_armed_and_not_tripped() -> [] int {
+    test.assert(!gate.armed(0));
+    test.assert(gate.armed(1));
+    test.assert(!gate.armed(2));
+    test.assert(!gate.armed(3));
+    test.assert(gate.readback_ok(884, 884));
+    test.assert(!gate.readback_ok(884, 885));
+    return 0;
+}
