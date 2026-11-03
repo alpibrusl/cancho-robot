@@ -1,0 +1,151 @@
+edition 12;
+
+import std.io;
+
+// camdisplay.cho -- webcam frames to the HDMI output of the FPGA board (cancho-hdl `DESIGN=hdmi`, rtl/top_hdmi.v).
+//
+//   echo /dev/video0 | camdisplay          (until stopped)
+//   printf '/dev/video0\n20\n' | camdisplay  (20 frames, then it closes both devices and exits 0)
+//
+// One cancho program owns both devices: the camera through `Camera` (320x240 grey, the newest frame, as `camera_hello` does) and
+// the board's serial port through `Tty` (/dev/ttyUSB1 at 1 Mbaud). Each frame goes out as the four bytes A5 5A C3 3C and then
+// 76,800 bytes; the board keeps it in block RAM and shows it at 2x. The frame goes out at the line rate (1 Mbaud, 0.77 s a frame,
+// about 1.2 frames a second; measured: 60 of 60 frames of random bytes arrived written whole, in 512-byte and in 4096-byte chunks).
+// What the board does NOT tolerate is a pause inside a frame: after about 78 ms without a byte it drops the frame in progress. (An
+// earlier version of this program paced its writes, on a wrong reading of a test that had a 0.2 s pause after the header.)
+// Runs until it is stopped or a device fails.
+// Authority: one camera and one serial device under /dev (`main`'s row names the camera; the serial port is a `Tty` narrowed to /dev, which `main` does not list, as `camfilter` does not).
+
+fn main(world: World) -> [camera_open("/dev"), camera_next] int {
+    let Split { io, ffi, fs, heap, args, out, ports, clock, signals, exec, tty, camera, mic, speaker } = split(world);
+    release(ffi);
+    release(fs);
+    release(args);
+    release(out);
+    release(ports);
+    release(clock);
+    release(signals);
+    release(exec);
+    release(mic);
+    release(speaker);
+    let cdev = narrow(camera, "/dev");
+    let tdev = narrow(tty, "/dev");
+    var code = 0;
+    var frames = 0;
+    borrow mut heap as &!hp in {
+        borrow mut io as &!o in {
+            region r {
+                let path = alloc_slice[r](256, byte_of(0));
+                var n = 0;
+                var ch = getchar(o);
+                while ch >= 0 && ch != '\n' && n < 255 {
+                    path[n] = byte_of(ch);
+                    n = n + 1;
+                    ch = getchar(o);
+                }
+                var limit = 0;
+                ch = getchar(o);
+                while ch >= '0' && ch <= '9' {
+                    limit = limit * 10 + (ch - '0');
+                    ch = getchar(o);
+                }
+                if n == 0 {
+                    io.write_all(o, "usage: echo /dev/video0 | camdisplay\n");
+                } else {
+                    match poller_new() {
+                        Polling::Failed(e) => { code = 2; }
+                        Polling::Ok(open) => {
+                            var p = open;
+                            borrow cdev as &c in {
+                                match camera_open(c, path[0..n]) {
+                                    CameraOpened::Failed(errno) => { code = 3; }
+                                    CameraOpened::Ok(cam) => {
+                                        borrow mut cam as &!k in {
+                                            if camera_configure(k, 320, 240) != 0 {
+                                                code = 4;
+                                            } else {
+                                                borrow tdev as &t in {
+                                                    match tty_open(t, "/dev/ttyUSB1") {
+                                                        TtyOpened::Failed(errno) => { code = 5; }
+                                                        TtyOpened::Ok(port) => {
+                                                            borrow mut port as &!q in {
+                                                                if tty_configure(q, 1000000) != 0 { code = 6; }
+                                                                borrow mut p as &!pw in { poller_add_tty(pw, q, 1, 1); }
+                                                                let head = alloc_slice[r](4, byte_of(0));
+                                                                head[0] = byte_of(165);
+                                                                head[1] = byte_of(90);
+                                                                head[2] = byte_of(195);
+                                                                head[3] = byte_of(60);
+                                                                let ev = alloc_slice[r](2, 0);
+                                                                let sink = alloc_slice[r](64, byte_of(0));
+                                                                let frame = box_slice(hp, 76800, byte_of(0));
+                                                                borrow mut frame as &!fw in {
+                                                                    var running = code == 0;
+                                                                    while running {
+                                                                        if limit > 0 && frames >= limit { running = false; }
+                                                                        if running {
+                                                                        let m = camera_next(k, contents(fw));
+                                                                        if m < 0 {
+                                                                            code = 7;
+                                                                            running = false;
+                                                                        } else if m == 76800 {
+                                                                            let px = contents(fw);
+                                                                            var sent = 0;
+                                                                            var stuck = 0;
+                                                                            while sent < 4 && stuck < 2000 {
+                                                                                let w = tty_write(q, head[sent..4]);
+                                                                                if w > 0 { sent = sent + w; } else { stuck = stuck + 1; }
+                                                                                borrow mut p as &!pw in { poller_wait(pw, ev, 1); }
+                                                                                let skip = tty_read(q, sink);
+                                                                            }
+                                                                            var off = 0;
+                                                                            while off < 76800 && stuck < 20000 {
+                                                                                var len = 4096;
+                                                                                if 76800 - off < len { len = 76800 - off; }
+                                                                                let w = tty_write(q, px[off..off + len]);
+                                                                                if w > 0 {
+                                                                                    off = off + w;
+                                                                                } else {
+                                                                                    // the serial buffer is full: let it drain, then try again
+                                                                                    stuck = stuck + 1;
+                                                                                    borrow mut p as &!pw in { poller_wait(pw, ev, 1); }
+                                                                                }
+                                                                                let skip = tty_read(q, sink);
+                                                                            }
+                                                                            if stuck >= 20000 {
+                                                                                code = 8;
+                                                                                running = false;
+                                                                            } else {
+                                                                                frames = frames + 1;
+                                                                                io.print_int(o, frames);
+                                                                                io.write_all(o, "\n");
+                                                                            }
+                                                                        }
+                                                                        }
+                                                                    }
+                                                                }
+                                                                unbox_slice(hp, frame);
+                                                            }
+                                                            tty_close(port);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        camera_close(cam);
+                                    }
+                                }
+                            }
+                            poller_close(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    release(cdev);
+    release(tdev);
+    release(heap);
+    release(io);
+    return code;
+}
