@@ -198,3 +198,32 @@ drives), 3 rounds of 1000 reads per id, arms still, torque off.
 
 **Changes.** Task #5's gate holds on this robot. The scan is read-only by construction (no `feetech_write`
 import), and its authority is pinned in CI; the hardware comparison is local-only, as section 11 says.
+
+## 2026-11-24 · side track · The bus read from a kernel written in cancho, in an emulator (read-only)
+
+**Asked.** Can the read side of this controller run with no operating system under it but one written in cancho,
+so that "one program per bus" is a property of the machine and the serial port is not a foreign call?
+The track and its reasons are in [`cancho-os.md`](cancho-os.md).
+
+**Setup.** [cancho-os](https://github.com/alpibrusl/cancho-os), branch `robot`, `dc9e141`; the compiler is cancho
+branch `freestanding` (`--target aarch64-none-elf`). `qemu-system-aarch64` 11.1.3, machines `raspi3b` and
+`raspi4b`, the same image on both. `src/feetech.cho` copied unchanged from this repository at `6192833`; no
+write builder is in the kernel. The bus is the emulated board's second serial port, connected to
+`sim/servos.cho`, a cancho program for the host that models servos 1 to 6 (model 777, position 2048 + 100 per
+id) and answers PING, READ and SYNC READ only.
+
+**What came out.**
+
+1. `servo scan`, PING of ids 1 to 8 with a 20 ms timeout: 1 to 6 present, 7 and 8 "no answer", "6 servos found",
+   on both machines. With no simulator attached: 8 times "no answer", "0 servos found".
+2. `servo pos`, READ of register 56: 2148, 2248, 2348, 2448, 2548, 2648, which is what the simulator holds.
+3. The kernel's authority report lists eleven foreign symbols, each a hardware primitive of one or two
+   instructions, and no libc. The simulator's lists `io_read` and `io_write`.
+4. The same three checks run in cancho-os's CI on Linux (the Pi 3 machine only: its QEMU has no Pi 4 model).
+
+**What this does not show.** No hardware, no timing, not the half-duplex line, not the Pi 5's serial ports, and
+a simulator written by the same hand as the driver (`cancho-os.md` section 4). It is a result about whether the
+code runs there, not about the robot.
+
+**Changes.** Nothing in v1. The track has a next step that needs no hardware (calibration and kinematics on the
+bare target) and one that does (the Pi 5).
