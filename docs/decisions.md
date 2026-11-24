@@ -78,7 +78,24 @@ cannot back, and this project's discipline is to claim only what a gate checks.
 **Revisit when:** a measurement shows jitter that matters, and then the first move is the design's
 section 13 item 5 (a threaded bus reader), not a real-time claim.
 
+## The controller on cancho-os is a side track, not v1
+
+**Decision** (the maintainer, 2026-11-24): explore running the controller on
+[cancho-os](https://github.com/alpibrusl/cancho-os), a kernel written in cancho with no Linux under it, with the
+robot's safety controller as that kernel's first real job. It is developed in an emulator first and moved to the
+Raspberry Pi 5 later. v1 does not wait for it: "The controller is the Raspberry Pi 5" above stands, on Debian.
+
+**Reason:** the two edges the authority proof does not reach on Linux ([`cancho-os.md`](cancho-os.md) section 1):
+other programs of the machine can open the bus, and the bus is reached through foreign calls the report can only
+list by symbol. A machine that runs only checked cancho and drives the UART itself removes both.
+
+**Cost:** a second place the bus code lives (the codec is copied, not shared, until there is a package for it);
+a board the emulator does not model; and the Pi 5's serial ports behind RP1.
+
+**Revisit when:** one of the three endings of `cancho-os.md` section 6 is met, or the track reaches the real arm
+read-only with the gate of #5, at which point which machine is v1's controller is a decision to take again.
+
 ---
 
-*History: written with task #15; the reasons summarise the design doc's own sections 2, 5, 6 and 7, they do
+*History: written with task #15 (the cancho-os record was added on 2026-11-24); the reasons summarise the design doc's own sections 2, 5, 6 and 7, they do
 not add new ones. A decision that changes is a new commit on this file, with its date and its reason.*

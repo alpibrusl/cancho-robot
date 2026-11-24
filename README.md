@@ -4,7 +4,22 @@
 
 **A robot arm controller whose authority you can check.** Research into driving a real arm, the SO-101 arms of an [XLeRobot](https://github.com/Vector-Wangel/XLeRobot), from [cancho](https://github.com/alpibrusl/cancho): the Feetech servo bus, calibration, kinematics and a safety core (workspace, joint limits, collisions, speed), with an authority report the compiler derives. The question it exists to answer: **can the compiler prove that the only thing able to move the arms is the safety core**, and that nothing else (a teleoperator, a learned policy, a second program) can reach the servo bus?
 
-**Status: research, design stage. Nothing is built yet.** There is a README, a logo and an epic with its tasks, and no code, no measurement and no claim beyond what is written here. The plan and its tasks are in the epic, [cancho-robot#16](https://github.com/alpibrusl/cancho-robot/issues/16). Speed of progress is not a goal; a result, positive or negative, written down with its measurement, is.
+**Status: research. The read side and the judgement are built and measured; nothing on `main` moves a servo.** What exists, by task of the epic ([cancho-robot#16](https://github.com/alpibrusl/cancho-robot/issues/16)), each with its setup and numbers in [`docs/research-log.md`](docs/research-log.md):
+
+| | task | state |
+|---|---|---|
+| #3 | open the bus at 1 Mbaud and get a ping answered | done, on macOS and on the robot's Raspberry Pi 5 |
+| #4 | the Feetech STS codec | done; a differential test against scservo_sdk and a mutation test run in CI |
+| #5 | read the whole robot, read-only | done on the Pi: 16 servos, 48,000 reads a side, 0 failures, ticks equal to scservo_sdk's |
+| #6 | calibration: ticks to LeRobot's normalised degrees | done; differential and mutation tests in CI |
+| #7 | kinematics, forward and inverse, against placo | built and logged; the issue is still open |
+| #8 | the safety core, judged on data (it moves nothing) | done |
+| #12, #15 | the toolbox contract; decision records | done |
+| #9 | actuation through the safety core, one owner of the bus | in review ([#27](https://github.com/alpibrusl/cancho-robot/pull/27)), against a simulated bus, without hardware |
+| #10 | keyboard teleoperation | in review ([#29](https://github.com/alpibrusl/cancho-robot/pull/29)) |
+| #11, #13 | the boundary to Python; measurements against the Python stack | not started |
+
+Two side tracks ask how far the claim can be pushed below the program: an FPGA between the controller and the bus ([#31](https://github.com/alpibrusl/cancho-robot/issues/31), [`docs/fpga-integration.md`](docs/fpga-integration.md)), and the controller on an operating system that is itself cancho ([`docs/cancho-os.md`](docs/cancho-os.md)). Speed of progress is not a goal; a result, positive or negative, written down with its measurement, is.
 
 ## Why
 

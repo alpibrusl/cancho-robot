@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cancho-robot: a robot arm controller whose authority you can check</title>
-<meta name="description" content="Research: driving the SO-101 arms of an XLeRobot from cancho, with a safety core every motion goes through and an authority report the compiler derives. Design stage.">
+<meta name="description" content="Research: driving the SO-101 arms of an XLeRobot from cancho, with a safety core every motion goes through and an authority report the compiler derives. The read side and the safety core are built and measured; nothing moves a servo yet.">
 <meta property="og:title" content="cancho-robot: a robot arm controller whose authority you can check">
-<meta property="og:description" content="Can the compiler prove that only the safety core can move the arms? Research, design stage: nothing is built yet.">
+<meta property="og:description" content="Can the compiler prove that only the safety core can move the arms? Research: the whole robot read from cancho, the safety core judged on data; nothing moves a servo yet.">
 <meta property="og:image" content="https://alpibrusl.github.io/cancho-robot/assets/cancho-robot-logo-256.png">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" type="image/png" href="assets/cancho-robot-icon-64.png">
@@ -145,7 +145,7 @@ ul.why span { color: var(--muted); font-size: .95rem; }
 
 <section class="hero" style="padding-top:3.5rem">
   <div>
-    <p class="badge"><i></i>Research &middot; design stage &middot; nothing is built yet</p>
+    <p class="badge"><i></i>Research &middot; reads the whole robot &middot; nothing moves a servo yet</p>
     <h1>A robot arm controller whose authority you can check.</h1>
     <p class="lead">Driving the SO-101 arms of an XLeRobot from cancho: the servo bus, calibration, kinematics and a safety core every motion goes through, with an authority report the compiler derives.</p>
     <p class="sub">The question it exists to answer: can the compiler prove that the only thing able to move the arms is the safety core, and that a teleoperator, a learned policy or a second program cannot reach the servo bus?</p>
@@ -207,7 +207,7 @@ keyboard / policy / recorder (Python) --request--&gt; safety core --command--&gt
 
 <section id="status">
   <h2>Status</h2>
-  <p class="sub"><strong>Research, design stage.</strong> There is a README, a logo and an epic with its tasks. There is no code, no measurement and no claim beyond what is written above.</p>
+  <p class="sub"><strong>Research.</strong> Built and measured: the bus opened at 1 Mbaud, the protocol codec, the whole robot read from the Raspberry Pi 5 (16 servos, 48,000 reads a side, 0 failures, ticks equal to scservo_sdk's), calibration, kinematics and the safety core judged on data. Nothing on the main branch moves a servo: actuation is in review, against a simulated bus. The README has the table, the research log has every setup and number.</p>
 </section>
 
 </div></main>
