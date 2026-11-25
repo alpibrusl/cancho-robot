@@ -24,6 +24,7 @@ jobs:
         run: |
           curl -fsSL https://raw.githubusercontent.com/alpibrusl/cancho/main/scripts/install.sh | sh -s "$CANCHO_REV"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "CANCHO=$HOME/.local/bin/cancho" >> "$GITHUB_ENV"
 
       - name: The pinned compiler is the one cancho.toml names
         working-directory: robot
@@ -52,19 +53,19 @@ jobs:
 
       - name: The codec's gates can fail (each deliberately wrong codec is caught)
         working-directory: robot
-        run: python3 tests/mutate_codec.py cancho python3
+        run: python3 tests/mutate_codec.py "$CANCHO" python3
 
       - name: Authority is within the ceiling (gate A4)
         working-directory: robot
-        run: python3 tests/authority_check.py cancho authority/driver.ceiling tests/driver.cho src/feetech.cho src/feetech_write.cho
+        run: python3 tests/authority_check.py "$CANCHO" authority/driver.ceiling tests/driver.cho src/feetech.cho src/feetech_write.cho
 
       - name: The authority gate can fail (a ceiling that is too small, and one that is stale, must be refused)
         working-directory: robot
         run: |
           printf 'io_write\n' > /tmp/too-small.ceiling
-          python3 tests/authority_check.py cancho /tmp/too-small.ceiling tests/driver.cho src/feetech.cho src/feetech_write.cho --expect-failure
+          python3 tests/authority_check.py "$CANCHO" /tmp/too-small.ceiling tests/driver.cho src/feetech.cho src/feetech_write.cho --expect-failure
           printf 'io_read\nio_write\nforeign open\n' > /tmp/stale.ceiling
-          python3 tests/authority_check.py cancho /tmp/stale.ceiling tests/driver.cho src/feetech.cho src/feetech_write.cho --expect-failure
+          python3 tests/authority_check.py "$CANCHO" /tmp/stale.ceiling tests/driver.cho src/feetech.cho src/feetech_write.cho --expect-failure
 
       - name: Calibration tests (this robot's ranges, truncation, drive mode, inverted ranges, sign-magnitude)
         working-directory: robot
@@ -88,11 +89,11 @@ jobs:
 
       - name: The calibration gates can fail (each deliberately wrong calibration is caught)
         working-directory: robot
-        run: python3 tests/mutate_calibration.py cancho python3
+        run: python3 tests/mutate_calibration.py "$CANCHO" python3
 
       - name: Calibration driver authority is within its ceiling
         working-directory: robot
-        run: python3 tests/authority_check.py cancho authority/calibration_driver.ceiling tests/calibration_driver.cho src/calibration.cho
+        run: python3 tests/authority_check.py "$CANCHO" authority/calibration_driver.ceiling tests/calibration_driver.cho src/calibration.cho
 
       - name: The kinematic chain is what the URDF says (src/so101.cho is generated, not edited)
         working-directory: robot
@@ -115,7 +116,7 @@ jobs:
 
       - name: The kinematics gates can fail (each deliberately wrong kinematics is caught)
         working-directory: robot
-        run: python3 tests/mutate_kinematics.py cancho python3
+        run: python3 tests/mutate_kinematics.py "$CANCHO" python3
       - name: Inverse kinematics tests (the live-state lessons, the jump guard, the refusals)
         working-directory: robot
         run: cancho test tests/ik_test.cho src/ik.cho src/kinematics.cho src/so101.cho --std
@@ -127,14 +128,14 @@ jobs:
         run: python3 tests/differential_ik.py build/ik_driver --cases 800
       - name: The ik gates can fail (each deliberately wrong solver is caught)
         working-directory: robot
-        run: python3 tests/mutate_ik.py cancho python3
+        run: python3 tests/mutate_ik.py "$CANCHO" python3
       - name: IK driver authority is within its ceiling
         working-directory: robot
-        run: python3 tests/authority_check.py cancho authority/ik_driver.ceiling tests/ik_driver.cho src/ik.cho src/kinematics.cho src/so101.cho
+        run: python3 tests/authority_check.py "$CANCHO" authority/ik_driver.ceiling tests/ik_driver.cho src/ik.cho src/kinematics.cho src/so101.cho
 
       - name: Kinematics driver authority is within its ceiling
         working-directory: robot
-        run: python3 tests/authority_check.py cancho authority/kinematics_driver.ceiling tests/kinematics_driver.cho src/kinematics.cho src/so101.cho
+        run: python3 tests/authority_check.py "$CANCHO" authority/kinematics_driver.ceiling tests/kinematics_driver.cho src/kinematics.cho src/so101.cho
       - name: Safety core tests (each rule, the two lex-robot regressions, the distance math, the frames)
         working-directory: robot
         run: cancho test tests/safety_test.cho src/safety.cho src/kinematics.cho src/so101.cho --std
@@ -152,16 +153,16 @@ jobs:
         run: python3 tests/differential_safety.py build/safety_driver --cases 1500 --collision-py /tmp/lex-robot/sidecar
       - name: The safety gates can fail (each deliberately wrong check is caught)
         working-directory: robot
-        run: python3 tests/mutate_safety.py cancho python3 /tmp/lex-robot/sidecar
+        run: python3 tests/mutate_safety.py "$CANCHO" python3 /tmp/lex-robot/sidecar
       - name: Safety driver authority is within its ceiling
         working-directory: robot
-        run: python3 tests/authority_check.py cancho authority/safety_driver.ceiling tests/safety_driver.cho src/safety.cho src/kinematics.cho src/so101.cho
+        run: python3 tests/authority_check.py "$CANCHO" authority/safety_driver.ceiling tests/safety_driver.cho src/safety.cho src/kinematics.cho src/so101.cho
       - name: Build the bus scan (task #5; it runs against the robot only, never here)
         working-directory: robot
         run: cancho build --std tools/scan.cho src/serial.cho src/feetech.cho -o build/scan
       - name: Scan authority is within its ceiling (libc for the bus, no write builder)
         working-directory: robot
-        run: python3 tests/authority_check.py cancho authority/scan.ceiling tools/scan.cho src/serial.cho src/feetech.cho
+        run: python3 tests/authority_check.py "$CANCHO" authority/scan.ceiling tools/scan.cho src/serial.cho src/feetech.cho
       - name: The toolbox contract tests (the catalogue, the tags the design names)
         working-directory: robot
         run: cancho test tests/check_test.cho src/check.cho src/rules.cho src/safety.cho src/ik.cho src/kinematics.cho src/so101.cho --std
@@ -173,13 +174,13 @@ jobs:
         run: python3 tests/conformance_check.py build/check
       - name: The toolbox gates can fail (each table drift is caught)
         working-directory: robot
-        run: python3 tests/mutate_check.py cancho python3
+        run: python3 tests/mutate_check.py "$CANCHO" python3
       - name: Check tool authority is within its ceiling (the proof it sends nothing)
         working-directory: robot
-        run: python3 tests/authority_check.py cancho authority/check_driver.ceiling tests/check_driver.cho src/check.cho src/rules.cho src/safety.cho src/ik.cho src/kinematics.cho src/so101.cho
+        run: python3 tests/authority_check.py "$CANCHO" authority/check_driver.ceiling tests/check_driver.cho src/check.cho src/rules.cho src/safety.cho src/ik.cho src/kinematics.cho src/so101.cho
       - name: Gate host module tests (register plan, refusals, enable sent last; issue #36)
         working-directory: robot
         run: cancho test tests/gate_test.cho src/gate.cho src/calibration.cho --std
       - name: Gate dry-run authority is within its ceiling (the proof it sends nothing)
         working-directory: robot
-        run: python3 tests/authority_check.py cancho authority/gate_driver.ceiling tests/gate_driver.cho src/gate.cho
+        run: python3 tests/authority_check.py "$CANCHO" authority/gate_driver.ceiling tests/gate_driver.cho src/gate.cho
